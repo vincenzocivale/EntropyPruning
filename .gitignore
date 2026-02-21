@@ -1,2 +1,3 @@
-./checkpoints/
-./wandb/
+/checkpoints/
+/wandb/
+*/__pycache__/
