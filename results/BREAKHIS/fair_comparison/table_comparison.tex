@@ -1,0 +1,27 @@
+\begin{table}[t]
+\centering
+\caption{Comparison on BREAKHIS. Best F1 in bold.}
+\label{tab:comparison}
+\begin{tabular}{llccccc}
+\toprule
+Method & Keep & ACC $\uparrow$ & F1 $\uparrow$ & TAR@FAR $\uparrow$ & ms/img $\downarrow$ & GFLOPs $\downarrow$ \\\\
+\midrule
+Baseline & 100\% & 0.9842 & \textbf{0.9872} & 0.1062 & 23.21 & 60.3 \\
+Random & 50\% & 0.9821 & 0.9846 & 0.0075 & 29.76 & 34.1 \\
+Random & 10\% & 0.8696 & 0.8401 & 0.0485 & 29.85 & 13.0 \\
+CLS Attention & 50\% & 0.9819 & 0.9843 & 0.0622 & 29.90 & 34.2 \\
+CLS Attention & 10\% & 0.8317 & 0.7923 & 0.0033 & 30.36 & 13.1 \\
+Forecaster & 50\% & 0.9835 & 0.9864 & 0.0324 & 31.57 & 34.4 \\
+Forecaster & 10\% & 0.8027 & 0.7460 & 0.0042 & 31.31 & 13.2 \\
+Forecaster + FT & 50\% & 0.9840 & 0.9871 & 0.8141 & 31.75 & 34.4 \\
+Forecaster + FT & 10\% & 0.9681 & 0.9696 & 0.3146 & 31.72 & 13.2 \\
+CropR & fixed & 0.9810 & 0.9845 & 0.5363 & 19.40 & 31.6 \\
+ToMe ($r$=0) & 100% & 0.9842 & \textbf{0.9872} & 0.1062 & 28.93 & 60.3 \\
+ToMe ($r$=4) & 51% & 0.9839 & 0.9869 & 0.1061 & 46.66 & 46.6 \\
+ToMe ($r$=8) & 2% & 0.9707 & 0.9726 & 0.1654 & 46.88 & 31.3 \\
+ToMe ($r$=16) & 1% & 0.4522 & 0.2940 & 0.0052 & 43.80 & 16.0 \\
+ToMe ($r$=24) & 1% & 0.3501 & 0.1839 & 0.0004 & 40.62 & 11.0 \\
+ToMe ($r$=32) & 1% & 0.2128 & 0.1187 & 0.0021 & 41.23 & 8.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
