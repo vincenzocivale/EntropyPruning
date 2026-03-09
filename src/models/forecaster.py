@@ -49,4 +49,4 @@ class AttentionForecaster(nn.Module):
         scores = self.score_head(
             torch.cat([x_norm, cls_exp], dim=-1)
         ).squeeze(-1)
-        return scores.softmax(-1)
+        return scores

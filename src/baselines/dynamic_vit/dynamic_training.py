@@ -69,11 +69,11 @@ print(f"Device: {device} | timm: {timm.__version__}")
 
 # %%
 DATASET_NAME = "NCT-CRC-HE"
-CKPT_BASE    = Path(f"/data/checkpoints-Attention-Pruning/{DATASET_NAME}")
+CKPT_BASE    = Path(f"/raid/DATASETS/checkpoints-Attention-Pruning/{DATASET_NAME}")
 
 CFG = dict(
     # ---- Dati ----
-    data_dir        = f"/data/{DATASET_NAME}",
+    data_dir        = f"/raid/DATASETS/{DATASET_NAME}",
     img_size        = 224,
     patch_size      = 16,
     batch_size      = 16,

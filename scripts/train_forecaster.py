@@ -1,6 +1,10 @@
 """Phase 2: Train AttentionForecaster to predict target-layer attention
 from source-layer embeddings."""
 
+import os
+# Disable HDF5 file locking to avoid [Errno 11] on some filesystems
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 import argparse
 from pathlib import Path
 
@@ -23,6 +27,22 @@ from src.data.h5_dataset import H5ForecastDataset
 from src.collection import collect_and_save_dataset
 
 
+def spearman_correlation(y_pred, y_true):
+    """Vectorized Spearman rank correlation in PyTorch."""
+    B, N = y_pred.shape
+    # Get ranks (0 to N-1)
+    r_pred = y_pred.argsort(dim=-1).argsort(dim=-1).float()
+    r_true = y_true.argsort(dim=-1).argsort(dim=-1).float()
+
+    # Pearson correlation on ranks
+    r_pred_m = r_pred - r_pred.mean(dim=-1, keepdim=True)
+    r_true_m = r_true - r_true.mean(dim=-1, keepdim=True)
+
+    num = (r_pred_m * r_true_m).sum(dim=-1)
+    den = torch.sqrt((r_pred_m**2).sum(dim=-1) * (r_true_m**2).sum(dim=-1))
+    return num / (den + 1e-8)
+
+
 def train_forecaster(layer_source, layer_target, cfg, device):
     run_name = f"src{layer_source:02d}_tgt{layer_target:02d}"
     print(f"\n{'='*60}")
@@ -43,7 +63,7 @@ def train_forecaster(layer_source, layer_target, cfg, device):
         reinit=True,
     )
 
-    kw_h5 = dict(batch_size=64, num_workers=4, pin_memory=True,
+    kw_h5 = dict(batch_size=128, num_workers=4, pin_memory=True,
                  persistent_workers=True)
     train_loader = DataLoader(
         H5ForecastDataset(cfg["dataset_cache"], "train",
@@ -63,6 +83,7 @@ def train_forecaster(layer_source, layer_target, cfg, device):
                             lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt,
                                                         T_max=cfg["epochs"])
+    scaler = torch.amp.GradScaler("cuda")
 
     best_val_kl = float('inf')
     best_val_rho = -1.0
@@ -71,26 +92,25 @@ def train_forecaster(layer_source, layer_target, cfg, device):
     for epoch in range(cfg["epochs"]):
         # Train
         forecaster.train()
-        train_kl, train_rho_list = 0., []
+        train_kl = 0.
 
         for emb, target, _ in tqdm(train_loader, leave=False,
                                    desc=f"Ep{epoch+1} train"):
             emb, target = emb.to(device), target.to(device)
-            pred = forecaster(emb)
+            
+            with torch.amp.autocast("cuda"):
+                logits = forecaster(emb)
+                loss_kl = F.kl_div(logits.log_softmax(-1), target,
+                                   reduction='batchmean')
 
-            loss_kl = F.kl_div((pred + 1e-8).log(), target + 1e-8,
-                               reduction='batchmean')
             opt.zero_grad()
-            loss_kl.backward()
+            scaler.scale(loss_kl).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(forecaster.parameters(), 1.0)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
 
             train_kl += loss_kl.item()
-            with torch.no_grad():
-                for b in range(len(emb)):
-                    rho, _ = spearmanr(pred[b].cpu().numpy(),
-                                       target[b].cpu().numpy())
-                    train_rho_list.append(rho)
 
         # Val
         forecaster.eval()
@@ -98,24 +118,22 @@ def train_forecaster(layer_source, layer_target, cfg, device):
         with torch.no_grad():
             for emb, target, _ in val_loader:
                 emb, target = emb.to(device), target.to(device)
-                pred = forecaster(emb)
-                val_kl += F.kl_div((pred + 1e-8).log(), target + 1e-8,
+                logits = forecaster(emb)
+                val_kl += F.kl_div(logits.log_softmax(-1), target,
                                    reduction='batchmean').item()
-                for b in range(len(emb)):
-                    rho, _ = spearmanr(pred[b].cpu().numpy(),
-                                       target[b].cpu().numpy())
-                    val_rho_list.append(rho)
+                
+                rho = spearman_correlation(logits, target)
+                val_rho_list.append(rho)
 
         sched.step()
 
         train_kl /= len(train_loader)
         val_kl /= len(val_loader)
-        train_rho = np.nanmean(train_rho_list)
-        val_rho = np.nanmean(val_rho_list)
+        val_rho = torch.cat(val_rho_list).mean().item()
 
         wandb.log({
             "epoch": epoch + 1, "train/kl": train_kl, "val/kl": val_kl,
-            "train/rho": train_rho, "val/rho": val_rho,
+            "val/rho": val_rho,
             "lr": sched.get_last_lr()[0],
         })
 
@@ -127,39 +145,33 @@ def train_forecaster(layer_source, layer_target, cfg, device):
         if (epoch + 1) % 5 == 0:
             print(f"  Ep {epoch+1:02d} | "
                   f"train_kl={train_kl:.4f} val_kl={val_kl:.4f} | "
-                  f"train_rho={train_rho:.3f} val_rho={val_rho:.3f}")
+                  f"val_rho={val_rho:.3f}")
 
     # Test with best checkpoint
     forecaster.load_state_dict(torch.load(save_path, map_location=device))
     forecaster.eval()
 
+    test_loader = DataLoader(
+        H5ForecastDataset(cfg["dataset_cache"], "test",
+                          layer_source, layer_target),
+        shuffle=False, **kw_h5)
+
     test_rho_forecaster = []
     test_rho_token_norm = []
 
-    with h5py.File(cfg["dataset_cache"], 'r') as f_h5:
-        grp = f_h5["test"]
-        emb_all = torch.from_numpy(
-            grp[f"emb_layer{layer_source}"][:]).float()
-        target_all = torch.from_numpy(
-            grp[f"attn_layer{layer_target}"][:]).float()
-
-    test_batch_ds = DataLoader(TensorDataset(emb_all, target_all),
-                               batch_size=64, shuffle=False)
-
     with torch.no_grad():
-        for emb, target in test_batch_ds:
-            emb = emb.to(device)
-            pred = forecaster(emb).cpu()
-            for b in range(len(emb)):
-                t = target[b].numpy()
-                rho_f, _ = spearmanr(pred[b].numpy(), t)
-                rho_n, _ = spearmanr(
-                    emb[b].cpu().norm(dim=-1).numpy(), t)
-                test_rho_forecaster.append(rho_f)
-                test_rho_token_norm.append(rho_n)
+        for emb, target, _ in test_loader:
+            emb, target = emb.to(device), target.to(device)
+            logits = forecaster(emb)
+            
+            rho_f = spearman_correlation(logits, target)
+            rho_n = spearman_correlation(emb.norm(dim=-1), target)
+            
+            test_rho_forecaster.append(rho_f)
+            test_rho_token_norm.append(rho_n)
 
-    test_rho_f = np.nanmean(test_rho_forecaster)
-    test_rho_n = np.nanmean(test_rho_token_norm)
+    test_rho_f = torch.cat(test_rho_forecaster).mean().item()
+    test_rho_n = torch.cat(test_rho_token_norm).mean().item()
 
     wandb.log({
         "test/rho_forecaster": test_rho_f,
@@ -203,7 +215,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb-project", type=str,
                         default="attention-forecaster")
-    parser.add_argument("--cache-dir", type=str, default="/data/data_cache")
+    parser.add_argument("--cache-dir", type=str, default="/raid/DATASETS/checkpoints-Attention-Pruning/")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -249,7 +261,7 @@ def main():
             {"train": train_loader, "val": val_loader, "test": test_loader},
             device,
             layers_source=cfg["layers_source"],
-            layer_target=cfg["layer_target"],
+            layers_target=[cfg["layer_target"]],
             save_path=cfg["dataset_cache"],
         )
     else:

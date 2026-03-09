@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(h5clear -s /raid/DATASETS/data_cache/NCT-CRC-HE_ablation_dataset.h5)",
+      "Bash(conda run -n entropy_pruning python -c \":*)",
+      "Read(//raid/DATASETS/checkpoints-Attention-Pruning/NCT-CRC-HE/uni_finetuned/**)",
+      "Read(//raid/DATASETS/checkpoints-Attention-Pruning/NCT-CRC-HE/ablations/**)",
+      "Read(//raid/DATASETS/checkpoints-Attention-Pruning/NCT-CRC-HE/forecaster/**)",
+      "Read(//raid/DATASETS/checkpoints-Attention-Pruning/NCT-CRC-HE/pruned_finetuned/**)"
+    ],
+    "additionalDirectories": [
+      "/raid/DATASETS/data_cache",
+      "/raid/DATASETS/checkpoints-Attention-Pruning/NCT-CRC-HE/ablations"
+    ]
+  }
+}

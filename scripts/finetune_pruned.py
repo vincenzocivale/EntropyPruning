@@ -50,7 +50,7 @@ def main():
     print(f"Device: {device}")
 
     dataset_name = Path(args.data_dir).name
-    base_ckpt = Path("checkpoints")
+    base_ckpt = Path("/raid/DATASETS/checkpoints-Attention-Pruning/")
 
     classifier_ckpt = args.classifier_ckpt or str(
         base_ckpt / dataset_name / "uni_finetuned" / "best_model.pt")

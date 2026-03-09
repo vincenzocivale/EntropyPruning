@@ -1,6 +1,10 @@
+import os
 import torch
 from torch.utils.data import Dataset
 import h5py
+
+# Disable HDF5 file locking to avoid [Errno 11] on some filesystems
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 
 class H5ForecastDataset(Dataset):
@@ -19,7 +23,8 @@ class H5ForecastDataset(Dataset):
 
     def _get_file(self):
         if self._file is None:
-            self._file = h5py.File(self.h5_path, 'r', swmr=True)
+            # Re-open in each worker process
+            self._file = h5py.File(self.h5_path, 'r')
         return self._file
 
     def __len__(self):

@@ -70,7 +70,7 @@ def main():
 
     dataset_name = Path(args.data_dir).name
     output_dir = Path(args.output_dir) if args.output_dir else \
-        Path(f"checkpoints/{dataset_name}/uni_finetuned")
+        Path(f"/raid/DATASETS/checkpoints-Attention-Pruning/{dataset_name}/uni_finetuned")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader, val_loader, test_loader, class_names, n_classes = \
