@@ -200,6 +200,8 @@ def train_forecaster(
     lr=1e-4,
     weight_decay=0.05,
     save_path=None,
+    model=None,
+    loss_fn=None,
 ):
     train_ds = H5ForecastDataset(h5_cache_path, "train", layer_source, layer_target)
     val_ds = H5ForecastDataset(h5_cache_path, "val", layer_source, layer_target)
@@ -215,13 +217,16 @@ def train_forecaster(
     val_loader = DataLoader(val_ds, shuffle=False, **kw)
     test_loader = DataLoader(test_ds, shuffle=False, **kw)
 
-    forecaster = AttentionForecaster(
-        embed_dim=1024,
-        hidden=hidden,
-        n_heads=n_heads,
-        n_layers=n_layers,
-        dropout=dropout,
-    ).to(device)
+    if model is not None:
+        forecaster = model.to(device)
+    else:
+        forecaster = AttentionForecaster(
+            embed_dim=1024,
+            hidden=hidden,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            dropout=dropout,
+        ).to(device)
 
     opt = torch.optim.AdamW(forecaster.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -235,9 +240,12 @@ def train_forecaster(
             emb, target = emb.to(device), target.to(device)
             pred = forecaster(emb)
 
-            loss_kl = F.kl_div((pred + 1e-8).log(), target + 1e-8, reduction="batchmean")
-            loss_mse = F.mse_loss(pred, target)
-            loss = loss_kl + 0.1 * loss_mse
+            if loss_fn is not None:
+                loss = loss_fn(pred, target)
+            else:
+                loss_kl = F.kl_div((pred + 1e-8).log(), target + 1e-8, reduction="batchmean")
+                loss_mse = F.mse_loss(pred, target)
+                loss = loss_kl + 0.1 * loss_mse
 
             opt.zero_grad()
             loss.backward()

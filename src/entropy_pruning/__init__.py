@@ -1,5 +1,5 @@
 from .data import HistologicalImageDataset, build_loaders
-from .models import UNILoRAClassifier, AttentionForecaster, UNILoRAWithForecasterPruning
+from .models import UNILoRAClassifier, AttentionForecaster, MLPForecaster, ConvForecaster, UNILoRAWithForecasterPruning
 from .attention_cache import build_attention_cache
 from .training import (
     train_forecaster,
@@ -14,6 +14,8 @@ __all__ = [
     "build_loaders",
     "UNILoRAClassifier",
     "AttentionForecaster",
+    "MLPForecaster",
+    "ConvForecaster",
     "UNILoRAWithForecasterPruning",
     "build_attention_cache",
     "train_forecaster",

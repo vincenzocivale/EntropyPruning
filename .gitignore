@@ -1,4 +1,4 @@
 /checkpoints/
 /wandb/
-*/__pycache__/
+/__pycache__/
 data_cache/

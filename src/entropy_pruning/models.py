@@ -57,6 +57,43 @@ class AttentionForecaster(nn.Module):
         return scores.softmax(-1)
 
 
+class MLPForecaster(nn.Module):
+    def __init__(self, embed_dim=1024, hidden=256, n_layers=2, dropout=0.1, **kwargs):
+        super().__init__()
+        layers = [nn.Linear(embed_dim, hidden), nn.GELU(), nn.Dropout(dropout)]
+        for _ in range(n_layers - 1):
+            layers += [nn.Linear(hidden, hidden), nn.GELU(), nn.Dropout(dropout)]
+        layers.append(nn.Linear(hidden, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, patch_embeddings):
+        scores = self.net(patch_embeddings).squeeze(-1)
+        return scores.softmax(-1)
+
+
+class ConvForecaster(nn.Module):
+    def __init__(self, embed_dim=1024, hidden=256, n_layers=2, dropout=0.1, kernel_size=5, **kwargs):
+        super().__init__()
+        layers = [
+            nn.Conv1d(embed_dim, hidden, kernel_size, padding=kernel_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        ]
+        for _ in range(n_layers - 1):
+            layers += [
+                nn.Conv1d(hidden, hidden, kernel_size, padding=kernel_size // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ]
+        layers.append(nn.Conv1d(hidden, 1, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, patch_embeddings):
+        x = patch_embeddings.transpose(1, 2)  # (B, C, N)
+        scores = self.net(x).squeeze(1)  # (B, N)
+        return scores.softmax(-1)
+
+
 class UNILoRAClassifier(nn.Module):
     def __init__(self, n_classes: int, dropout: float = 0.1):
         super().__init__()

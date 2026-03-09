@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /home/vcivale/EntropyPruning/*.ipynb)",
+      "Bash(python3 -c \"import sys,json; nb=json.load\\(sys.stdin\\); [print\\(f''=== Cell {i} \\({c[\"\"cell_type\"\"]}\\) ===\\\\n{chr\\(10\\).join\\(c[\"\"source\"\"]\\)}''\\) for i,c in enumerate\\(nb[''cells'']\\)]\")"
+    ],
+    "additionalDirectories": [
+      "/home/vcivale/EntropyPruning"
+    ]
+  }
+}
