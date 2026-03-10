@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(ls /home/vcivale/EntropyPruning/*.ipynb)",
-      "Bash(python3 -c \"import sys,json; nb=json.load\\(sys.stdin\\); [print\\(f''=== Cell {i} \\({c[\"\"cell_type\"\"]}\\) ===\\\\n{chr\\(10\\).join\\(c[\"\"source\"\"]\\)}''\\) for i,c in enumerate\\(nb[''cells'']\\)]\")"
+      "Bash(python3 -c \"import sys,json; nb=json.load\\(sys.stdin\\); [print\\(f''=== Cell {i} \\({c[\"\"cell_type\"\"]}\\) ===\\\\n{chr\\(10\\).join\\(c[\"\"source\"\"]\\)}''\\) for i,c in enumerate\\(nb[''cells'']\\)]\")",
+      "Bash(jupyter nbconvert --to script ablation_loss.ipynb --stdout)",
+      "Bash(cp /home/vcivale/EntropyPruning/ablation_loss.ipynb /home/vcivale/EntropyPruning/ablation_loss_fast.ipynb)",
+      "Bash(cp /home/vcivale/EntropyPruning/ablation_architecture.ipynb /home/vcivale/EntropyPruning/ablation_architecture_fast.ipynb)",
+      "Bash(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader)",
+      "Read(//raid/DATASETS/checkpoints-Attention-Pruning/**)",
+      "Read(//raid/DATASETS/**)",
+      "Bash(find /raid/DATASETS/ -maxdepth 2 -name BREAKHIS -o -name BreaKHis*)"
     ],
     "additionalDirectories": [
       "/home/vcivale/EntropyPruning"
