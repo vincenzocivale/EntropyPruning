@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.amp import autocast
 from sklearn.metrics import f1_score
 
 
@@ -41,8 +42,9 @@ def evaluate(model, loader, device, far_threshold=1e-4):
 
     with torch.no_grad():
         for imgs, labels in loader:
-            logits = model(imgs.to(device))
-            probs = logits.softmax(-1)
+            with autocast('cuda'):
+                logits = model(imgs.to(device))
+            probs = logits.float().softmax(-1)
             preds = probs.argmax(-1).cpu()
             score = probs.max(-1).values.cpu()
             all_preds.append(preds)

@@ -22,7 +22,10 @@ def run_epoch(model, loader, criterion, device, optimizer=None, scheduler=None,
               scaler=None):
     training = optimizer is not None
     model.train() if training else model.eval()
-    total_loss, correct, total = 0., 0, 0
+    # accumulate on GPU — pull to CPU once per epoch instead of once per batch
+    total_loss = torch.tensor(0., device=device)
+    correct = torch.tensor(0, device=device)
+    total = 0
 
     with torch.set_grad_enabled(training):
         for imgs, labels in tqdm(loader, leave=False):
@@ -41,11 +44,11 @@ def run_epoch(model, loader, criterion, device, optimizer=None, scheduler=None,
                 scaler.update()
                 scheduler.step()
 
-            total_loss += loss.item() * len(labels)
-            correct += (logits.argmax(1) == labels).sum().item()
+            total_loss += loss.detach() * len(labels)
+            correct += (logits.argmax(1) == labels).sum()
             total += len(labels)
 
-    return total_loss / total, correct / total
+    return (total_loss / total).item(), (correct / total).item()
 
 
 def main():

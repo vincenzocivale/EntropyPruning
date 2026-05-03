@@ -25,7 +25,9 @@ def build_loaders(data_dir, img_size=224, batch_size=8, num_workers=4,
     sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
 
     kw = dict(batch_size=batch_size, num_workers=num_workers,
-              pin_memory=True, persistent_workers=True)
+              pin_memory=True, persistent_workers=num_workers > 0)
+    if num_workers > 0:
+        kw['prefetch_factor'] = 4
     train_loader = DataLoader(train_ds, sampler=sampler,
                               drop_last=drop_last_train, **kw)
     val_loader = DataLoader(val_ds, shuffle=False, **kw)

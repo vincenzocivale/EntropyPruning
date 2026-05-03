@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.amp import GradScaler, autocast
 from sklearn.metrics import f1_score
 from tqdm.auto import tqdm
 import wandb
@@ -41,6 +42,8 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--wandb-project", type=str,
                         default="pruned-finetuning")
+    parser.add_argument("--grad-accum", type=int, default=1,
+                        help="Gradient accumulation steps (effective batch = batch_size * grad_accum)")
     parser.add_argument("--eval-baseline", action="store_true",
                         help="Also evaluate unpruned baseline")
     args = parser.parse_args()
@@ -119,12 +122,15 @@ def main():
         {"params": head_params, "lr": args.lr_head},
     ], weight_decay=args.weight_decay)
 
-    total_steps = args.epochs * len(train_loader)
+    # each optimizer step covers grad_accum mini-batches
+    steps_per_epoch = (len(train_loader) + args.grad_accum - 1) // args.grad_accum
+    total_steps = args.epochs * steps_per_epoch
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=[args.lr_backbone, args.lr_head],
         total_steps=total_steps, pct_start=0.1)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    scaler = GradScaler('cuda')
 
     # Training
     run_name = (f"prune_layer{args.prune_layer}"
@@ -137,27 +143,38 @@ def main():
     best_val_f1 = 0.
     for epoch in range(args.epochs):
         model.train()
-        total_loss = 0.
+        # accumulate on GPU — pull to CPU once per epoch
+        total_loss = torch.tensor(0., device=device)
         all_preds, all_labels = [], []
 
-        for imgs, labels in tqdm(train_loader, leave=False,
-                                 desc=f"Ep{epoch+1}"):
+        opt.zero_grad()
+        for step, (imgs, labels) in enumerate(
+            tqdm(train_loader, leave=False, desc=f"Ep{epoch+1}")
+        ):
             imgs, labels = imgs.to(device), labels.to(device)
-            logits = model(imgs)
-            loss = criterion(logits, labels)
-            opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            sched.step()
-            total_loss += loss.item() * len(labels)
+            with autocast('cuda'):
+                logits = model(imgs)
+                loss = criterion(logits, labels) / args.grad_accum
+
+            scaler.scale(loss).backward()
+
+            is_last = (step + 1) == len(train_loader)
+            if (step + 1) % args.grad_accum == 0 or is_last:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+                sched.step()
+                opt.zero_grad()
+
+            total_loss += loss.detach() * args.grad_accum * len(labels)
             all_preds.append(logits.argmax(-1).cpu())
             all_labels.append(labels.cpu())
 
         train_f1 = f1_score(torch.cat(all_labels).numpy(),
                             torch.cat(all_preds).numpy(),
                             average='macro', zero_division=0)
-        train_loss = total_loss / len(train_loader.dataset)
+        train_loss = total_loss.item() / len(train_loader.dataset)
 
         val_metrics = evaluate(model, val_loader, device, args.far_threshold)
 
