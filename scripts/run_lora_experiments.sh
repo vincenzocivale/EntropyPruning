@@ -12,7 +12,7 @@ CKPT_BASE=/data/EAF_data/thunder/checkpoints
 LOG_DIR=/data/EAF_data/thunder/logs/lora_experiments
 MODEL=uni
 DATASETS=(mhist wilds spider_colorectal)
-KEEP_RATIOS=(0.9 0.8 0.7)
+KEEP_RATIOS=(0.1 0.2 0.3)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
 
@@ -126,7 +126,7 @@ phase3() {
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 log "=== Starting LoRA experiments: UNI on mhist, wilds, spider_colorectal ==="
-log "Pruning rates: 10%, 20%, 30% (keep-ratios: 0.9, 0.8, 0.7)"
+log "Pruning rates: 10%, 20%, 30% (keep-ratios: 0.1, 0.2, 0.3)"
 
 # Step 0: download missing datasets
 for ds in "${DATASETS[@]}"; do
