@@ -198,7 +198,17 @@ def main():
               f"val_acc={val_metrics['acc']:.4f}  val_f1={val_metrics['f1_macro']:.4f}")
 
         if use_wandb:
-            wandb.log(row)
+            wandb.log({
+                "epoch": epoch,
+                "train/loss": tr_loss,
+                "train/acc": tr_acc,
+                "train/grad_norm": gnorm,
+                "train/lr_backbone": lr_backbone,
+                "train/lr_head": lr_head,
+                "val/acc": val_metrics["acc"],
+                "val/f1_macro": val_metrics["f1_macro"],
+                "val/tar_at_far": val_metrics["tar_at_far"],
+            })
 
         # Checkpoint on chosen metric
         current = val_metrics[args.early_stopping_metric]
@@ -255,6 +265,8 @@ def main():
             "test/acc": test_metrics["acc"],
             "test/f1_macro": test_metrics["f1_macro"],
             "test/tar_at_far": test_metrics["tar_at_far"],
+            "val/best_f1_macro": best_metric,
+            "val/best_epoch": best_epoch,
         })
         wandb.finish()
 

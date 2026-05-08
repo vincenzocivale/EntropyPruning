@@ -36,7 +36,7 @@ def spearman_correlation(y_pred, y_true):
 
 
 def train_forecaster(layer_source, layer_target, cfg, device):
-    run_name = f"src{layer_source:02d}_tgt{layer_target:02d}"
+    run_name = f"{cfg['model_name']}_{cfg['dataset_name']}_phase2_src{layer_source:02d}_tgt{layer_target:02d}"
     print(f"\n{'='*60}\n  Experiment: {run_name}\n{'='*60}")
 
     wandb.init(
@@ -142,7 +142,7 @@ def train_forecaster(layer_source, layer_target, cfg, device):
     wandb.log({
         "test/rho_forecaster": test_rho_f, "test/rho_token_norm": test_rho_n,
         "test/delta_vs_norm": test_rho_f - test_rho_n,
-        "best_val_rho": best_val_rho, "best_val_kl": best_val_kl,
+        "val/best_rho": best_val_rho, "val/best_kl": best_val_kl,
     })
     print(f"\n  Test rho forecaster: {test_rho_f:.3f}")
     print(f"  Test rho token norm: {test_rho_n:.3f}")

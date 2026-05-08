@@ -11,6 +11,7 @@ The pipeline is built on top of [THUNDER](https://github.com/MICS-Lab/thunder) f
 | Document | Description |
 |---|---|
 | [Setup](setup.md) | Environment setup and installation |
+| [Machine Paths (Nanopore-PC)](machine_paths.md) | Path critici dataset, pesi, checkpoint su questa macchina |
 | [Architecture](architecture.md) | System design, class hierarchy, data flow |
 | [Adaptation Strategies](adaptation_strategies.md) | Choosing between linear probing, LoRA, full fine-tuning, BitFit |
 | [Training Pipeline](training_pipeline.md) | Step-by-step Phase 1 → 2 → 3 guide |

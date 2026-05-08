@@ -205,7 +205,15 @@ def main():
         history.append(row)
 
         if use_wandb:
-            wandb.log(row)
+            wandb.log({
+                "epoch": epoch + 1,
+                "train/loss": row["train_loss"],
+                "train/acc": row["train_acc"],
+                "train/grad_norm": row["train_grad_norm"],
+                "val/acc": val_m["acc"],
+                "val/f1_macro": val_m["f1_macro"],
+                "val/tar_at_far": val_m["tar_at_far"],
+            })
 
         if val_m["f1_macro"] > best_val_f1:
             best_val_f1 = val_m["f1_macro"]
@@ -256,6 +264,7 @@ def main():
             "test/tar_at_far": test_m["tar_at_far"],
             "test/ms_per_img": test_b["ms_per_img"],
             "test/gflops": test_b["gflops"],
+            "val/best_f1_macro": best_val_f1,
             **{f"baseline/{k}": v for k, v in baseline_results.items()},
         })
         wandb.finish()
