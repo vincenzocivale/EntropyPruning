@@ -79,6 +79,23 @@ def main():
                               args.batch_size, args.num_workers, drop_last_train=True)
     print(f"Classes ({n_classes}): {class_names}")
 
+    # --- W&B init (before baseline so baseline logs appear at step 0) ---
+    run_name = (f"{args.model_name}_{args.dataset_name}"
+                f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
+    use_wandb = args.wandb_project is not None
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            job_type="phase3",
+            group=f"{args.dataset_name}/{args.model_name}",
+            config=vars(args),
+            tags=[args.model_name, args.dataset_name,
+                  f"prune_layer_{args.prune_layer}",
+                  f"keep_{int(args.keep_ratio * 100)}pct",
+                  "phase3"],
+        )
+
     # --- Optional baseline benchmark ---
     baseline_results = {}
     if args.eval_baseline:
@@ -98,6 +115,13 @@ def main():
         }
         print(f"\n-- Baseline --  acc={bl_m['acc']:.3f}  f1={bl_m['f1_macro']:.3f}  "
               f"ms/img={bl_b['ms_per_img']:.2f}  GFLOPs={bl_b['gflops']}")
+        if use_wandb:
+            wandb.log({
+                "test/acc": baseline_results["baseline_acc"],
+                "test/f1_macro": baseline_results["baseline_f1_macro"],
+                "test/ms_per_img": baseline_results["baseline_ms_per_img"],
+                "test/gflops": baseline_results["baseline_gflops"],
+            }, step=0)
         del baseline
 
     # --- Forecaster ---
@@ -123,6 +147,12 @@ def main():
 
     pre = evaluate(model, val_loader, device, args.far_threshold)
     print(f"\nPre fine-tuning val: acc={pre['acc']:.3f}  f1={pre['f1_macro']:.3f}")
+    if use_wandb:
+        wandb.config.update({
+            "pre_val_acc": pre["acc"],
+            "pre_val_f1_macro": pre["f1_macro"],
+            **baseline_results,
+        })
 
     # --- Optimizer (AMP) ---
     backbone_params = [p for _, p in model.backbone.named_parameters() if p.requires_grad]
@@ -136,28 +166,6 @@ def main():
         total_steps=total_steps, pct_start=0.1)
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     scaler = GradScaler("cuda")
-
-    # --- W&B ---
-    run_name = (f"{args.model_name}_{args.dataset_name}"
-                f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
-    use_wandb = args.wandb_project is not None
-    if use_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=run_name,
-            job_type="phase3",
-            group=f"{args.dataset_name}/{args.model_name}",
-            config={
-                **vars(args),
-                "pre_val_acc": pre["acc"],
-                "pre_val_f1_macro": pre["f1_macro"],
-                **baseline_results,
-            },
-            tags=[args.model_name, args.dataset_name,
-                  f"prune_layer_{args.prune_layer}",
-                  f"keep_{int(args.keep_ratio * 100)}pct",
-                  "phase3"],
-        )
 
     # --- Training ---
     best_val_f1 = 0.
@@ -265,8 +273,7 @@ def main():
             "test/ms_per_img": test_b["ms_per_img"],
             "test/gflops": test_b["gflops"],
             "val/best_f1_macro": best_val_f1,
-            **{f"baseline/{k}": v for k, v in baseline_results.items()},
-        })
+        }, step=args.epochs)
         wandb.finish()
 
 
