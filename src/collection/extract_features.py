@@ -7,49 +7,52 @@ from tqdm.auto import tqdm
 
 def collect_and_save_dataset(model, loaders_dict, device,
                              layers_source, layers_target, save_path):
-    """Extract embeddings and attention maps from a trained model and save to HDF5.
+    """Extract embeddings and CLS attention maps from a trained model and save to HDF5.
 
-    Hooks into the attention layers to capture:
-    - Patch embeddings at each source layer (excluding CLS token)
-    - CLS attention weights at multiple target layers (averaged over heads)
+    Hooks into each attention layer to capture:
+    - Patch embeddings at source layers (spatial tokens only, excluding prefix tokens).
+    - CLS-to-patch attention weights at target layers (mean over heads).
+
+    Compatible with any GenericLoRAClassifier wrapping a ThunderBackboneAdapter.
+    Dimensions (n_patches, embed_dim) are inferred from model.adapter.
 
     Args:
-        model: Trained UNILoRAClassifier (frozen, eval mode)
-        loaders_dict: dict of {split_name: DataLoader}
-        device: torch device
-        layers_source: list of layer indices for embeddings
-        layers_target: list of layer indices for attention maps
-        save_path: path to save the HDF5 file
+        model:        GenericLoRAClassifier (frozen, eval mode). Must have .adapter.
+        loaders_dict: {split_name: DataLoader} yielding (imgs, labels) tuples.
+        device:       torch device.
+        layers_source: list of block indices to extract patch embeddings from.
+        layers_target: int or list of block indices to extract CLS attention from.
+        save_path:    output HDF5 file path.
+
+    HDF5 layout per split:
+        labels          (N,)            int32
+        emb_layer{L}    (N, P, D)       float16   P=n_patches, D=embed_dim
+        attn_layer{L}   (N, P)          float16
     """
     if isinstance(layers_target, int):
         layers_target = [layers_target]
+
+    n_patches = model.adapter.n_patches
+    embed_dim = model.adapter.embed_dim
+    num_prefix = model.adapter.num_prefix_tokens
 
     with h5py.File(save_path, 'w') as f:
         for split_name, loader in loaders_dict.items():
             print(f"\nCollecting {split_name}...")
 
             n_total = len(loader.dataset)
-            n_patches = 196
-            embed_dim = 1024
-
             grp = f.create_group(split_name)
-            ds_label = grp.create_dataset(
-                "labels", shape=(n_total,), dtype='i4')
-            
+            ds_label = grp.create_dataset("labels", shape=(n_total,), dtype='i4')
             ds_attn = {
                 lt: grp.create_dataset(
-                    f"attn_layer{lt}",
-                    shape=(n_total, n_patches),
+                    f"attn_layer{lt}", shape=(n_total, n_patches),
                     dtype='f2', chunks=(128, n_patches))
                 for lt in layers_target
             }
-            
             ds_embs = {
                 ls: grp.create_dataset(
-                    f"emb_layer{ls}",
-                    shape=(n_total, n_patches, embed_dim),
-                    dtype='f2',
-                    chunks=(128, n_patches, embed_dim))
+                    f"emb_layer{ls}", shape=(n_total, n_patches, embed_dim),
+                    dtype='f2', chunks=(128, n_patches, embed_dim))
                 for ls in layers_source
             }
 
@@ -75,16 +78,19 @@ def collect_and_save_dataset(model, loaders_dict, device,
                     attn = attn.softmax(-1)
 
                     if idx in layers_source:
-                        cache[f"emb_{idx}"] = x[:, 1:].detach().cpu().half()
+                        cache[f"emb_{idx}"] = (
+                            x[:, num_prefix:].detach().cpu().half()
+                        )
                     if idx in layers_target:
-                        # CLS attention to other tokens, averaged over heads
-                        cache[f"attn_{idx}"] = attn[:, :, 0, 1:].mean(1).detach().cpu().half()
+                        cache[f"attn_{idx}"] = (
+                            attn[:, :, 0, num_prefix:].mean(1).detach().cpu().half()
+                        )
 
                     x = (self.attn_drop(attn) @ v).transpose(1, 2).reshape(B, N, C)
                     return self.proj_drop(self.proj(x))
                 return fwd
 
-            for i, block in enumerate(model.backbone.model.blocks):
+            for i, block in enumerate(model.raw_backbone.blocks):
                 if i in layers_source or i in layers_target:
                     orig[i] = block.attn.forward
                     block.attn.forward = types.MethodType(make_hook(i), block.attn)
@@ -103,7 +109,6 @@ def collect_and_save_dataset(model, loaders_dict, device,
                     ds_attn[lt][ptr:ptr + B] = torch.cat(buf_attn[lt]).numpy()
                 for ls in layers_source:
                     ds_embs[ls][ptr:ptr + B] = torch.cat(buf_embs[ls]).numpy()
-                
                 buf_labels.clear()
                 for lt in layers_target: buf_attn[lt].clear()
                 for ls in layers_source: buf_embs[ls].clear()
@@ -111,9 +116,7 @@ def collect_and_save_dataset(model, loaders_dict, device,
 
             ptr = 0
             with torch.no_grad():
-                for i_batch, (imgs, labels) in enumerate(
-                    tqdm(loader, desc=split_name)
-                ):
+                for i_batch, (imgs, labels) in enumerate(tqdm(loader, desc=split_name)):
                     cache.clear()
                     model(imgs.to(device))
                     buf_labels.append(labels.numpy())
@@ -121,13 +124,12 @@ def collect_and_save_dataset(model, loaders_dict, device,
                         buf_attn[lt].append(cache[f"attn_{lt}"])
                     for ls in layers_source:
                         buf_embs[ls].append(cache[f"emb_{ls}"])
-                    
                     if (i_batch + 1) % FLUSH_EVERY == 0:
                         ptr = flush(ptr)
 
             ptr = flush(ptr)
 
-            for i, block in enumerate(model.backbone.model.blocks):
+            for i, block in enumerate(model.raw_backbone.blocks):
                 if i in orig:
                     block.attn.forward = orig[i]
 

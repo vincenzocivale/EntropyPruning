@@ -1,63 +1,94 @@
 import torch
 import torch.nn as nn
-import timm
 from peft import LoraConfig
 from peft.tuners.lora import LoraModel
 
+from .backbone_adapter import ThunderBackboneAdapter
 
-class UNILoRAWithForecasterPruning(nn.Module):
-    def __init__(self, n_classes, forecaster, prune_layer, keep_ratio,
-                 dropout=0.1):
+
+class GenericLoRAWithForecasterPruning(nn.Module):
+    """
+    Forecaster-guided token pruning model for any timm-based Thunder backbone.
+
+    Runs the full backbone up to prune_layer, scores spatial patch tokens with a
+    frozen AttentionForecaster, keeps the top keep_ratio fraction, then runs the
+    remaining blocks. Prefix tokens (CLS + register tokens) are always preserved.
+
+    Args:
+        backbone:    raw timm model from thunder's get_model_from_name.
+        adapter:     ThunderBackboneAdapter for backbone.
+        n_classes:   number of output classes.
+        forecaster:  trained AttentionForecaster (must be frozen before passing in).
+        prune_layer: block index where pruning is applied (0-indexed).
+        keep_ratio:  fraction of spatial patch tokens to keep (e.g. 0.1 = top 10%).
+        lora_r, lora_alpha: LoRA parameters.
+        dropout:     classifier head dropout.
+
+    Note:
+        Load Phase 1 checkpoint with strict=False — peft key prefix differs from
+        a plain model, and the forecaster keys are new.
+    """
+
+    def __init__(self, backbone: nn.Module, adapter: ThunderBackboneAdapter,
+                 n_classes: int, forecaster: nn.Module,
+                 prune_layer: int, keep_ratio: float,
+                 lora_r: int = 8, lora_alpha: int = 32, dropout: float = 0.1):
         super().__init__()
-        backbone = timm.create_model(
-            "hf-hub:MahmoodLab/uni", pretrained=True,
-            init_values=1e-5, dynamic_img_size=True,
-        )
+        self.adapter = adapter
         lora_config = LoraConfig(
-            r=8, lora_alpha=32,
+            r=lora_r, lora_alpha=lora_alpha,
             target_modules=["qkv", "proj", "fc1", "fc2"],
             lora_dropout=0.1, bias="none",
         )
         self.backbone = LoraModel(backbone, lora_config, adapter_name="default")
         self.head = nn.Sequential(
-            nn.LayerNorm(1024),
+            nn.LayerNorm(adapter.embed_dim),
             nn.Dropout(dropout),
-            nn.Linear(1024, n_classes),
+            nn.Linear(adapter.embed_dim, n_classes),
         )
         self.forecaster = forecaster
         self.prune_layer = prune_layer
         self.keep_ratio = keep_ratio
 
+    @property
+    def raw_backbone(self) -> nn.Module:
+        """The underlying timm VisionTransformer (unwrapped from peft)."""
+        return self.backbone.model
+
     def forward(self, x):
-        make_block_hook = self._make_block_hook()
-        orig_fwd = self.backbone.model.blocks[self.prune_layer].forward
-        self.backbone.model.blocks[self.prune_layer].forward = \
-            make_block_hook(self.prune_layer)
+        hook = self._make_block_hook()(self.prune_layer)
+        orig_fwd = self.raw_backbone.blocks[self.prune_layer].forward
+        self.raw_backbone.blocks[self.prune_layer].forward = hook
         out = self.head(self.backbone(x))
-        self.backbone.model.blocks[self.prune_layer].forward = orig_fwd
+        self.raw_backbone.blocks[self.prune_layer].forward = orig_fwd
         return out
 
     def _make_block_hook(self):
-        def make_block_hook(idx):
-            orig_fwd = self.backbone.model.blocks[idx].forward
+        num_prefix = self.adapter.num_prefix_tokens
+
+        def make_hook(idx):
+            orig_fwd = self.raw_backbone.blocks[idx].forward
             training = self.training
             forecaster = self.forecaster
             keep_ratio = self.keep_ratio
 
             def block_fwd(x):
                 x = orig_fwd(x)
-                B, N, D = x.shape
-                patch_emb = x[:, 1:]
+                B, _, D = x.shape
+                prefix = x[:, :num_prefix, :]       # CLS + register tokens — always kept
+                patches = x[:, num_prefix:, :]      # spatial patches — subject to pruning
+                N = patches.shape[1]
+
                 with torch.no_grad():
-                    scores = forecaster(patch_emb)
-                k_keep = max(1, int((N - 1) * keep_ratio))
+                    scores = forecaster(patches)     # (B, N)
+
+                k_keep = max(1, int(N * keep_ratio))
                 topk_vals = scores.topk(k_keep, dim=-1).values
                 threshold = topk_vals[:, -1:]
                 soft_mask = torch.sigmoid((scores - threshold) / 0.05)
                 hard_mask = (scores >= threshold).float()
                 st_mask = hard_mask - soft_mask.detach() + soft_mask
-                cls_tok = x[:, :1, :]
-                patches = x[:, 1:, :]
+
                 topk_idx = scores.topk(k_keep, dim=-1).indices
                 if training:
                     masked_patches = patches * st_mask.unsqueeze(-1)
@@ -68,6 +99,6 @@ class UNILoRAWithForecasterPruning(nn.Module):
                     kept = torch.stack(
                         [patches[b][topk_idx[b]] for b in range(B)]
                     )
-                return torch.cat([cls_tok, kept], dim=1)
+                return torch.cat([prefix, kept], dim=1)
             return block_fwd
-        return make_block_hook
+        return make_hook
