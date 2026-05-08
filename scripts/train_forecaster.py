@@ -176,6 +176,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb-project", type=str, default="attention-forecaster")
     parser.add_argument("--cache-dir", type=str, default=None)
+    parser.add_argument("--forecaster-dir", type=str, default=None,
+                        help="Override forecaster checkpoint output dir.")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -203,7 +205,8 @@ def main():
         embed_dim=adapter.embed_dim,
         output_dir=base_ckpt / args.dataset_name / f"{args.model_name}_finetuned",
         dataset_cache=cache_dir / f"{args.dataset_name}_{args.model_name}_features.h5",
-        forecaster_dir=base_ckpt / args.dataset_name / f"{args.model_name}_forecaster",
+        forecaster_dir=Path(args.forecaster_dir) if args.forecaster_dir else
+            base_ckpt / args.dataset_name / f"{args.model_name}_forecaster",
         layers_source=args.layers_source, layer_target=layer_target,
         hidden=args.hidden, n_heads=args.n_heads, n_layers=args.n_layers,
         dropout=args.dropout, epochs=args.epochs, lr=args.lr,
