@@ -70,7 +70,7 @@ $PYTHON $SCRIPTS/train_forecaster.py \
     --adaptation lora \
     --classifier-ckpt $CKPT/${MODEL}_lora/best_model.pt \
     --forecaster-dir  $CKPT/${MODEL}_forecaster \
-    --cache-dir       $CKPT \
+    --cache-dir       $CKPT/lora_cache \
     --layers-source   $PRUNE_LAYER \
     --wandb-project eaf
 ```

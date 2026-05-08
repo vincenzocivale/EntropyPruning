@@ -82,7 +82,7 @@ phase2() {
         --adaptation lora \
         --classifier-ckpt "$CKPT_BASE/$ds/${MODEL}_lora/best_model.pt" \
         --forecaster-dir "$forecaster_dir" \
-        --cache-dir "$CKPT_BASE/$ds" \
+        --cache-dir "$CKPT_BASE/$ds/lora_cache" \
         --wandb-project eaf \
         2>&1 | tee "$LOG_DIR/phase2_${MODEL}_${ds}.log"
     [ -f "$forecaster_ckpt" ] || die "Phase2 $ds did not produce $forecaster_ckpt"
