@@ -96,6 +96,8 @@ def main():
     parser.add_argument("--early-stopping-metric", type=str, default="f1_macro",
                         choices=["acc", "f1_macro"],
                         help="Metric used to select the best checkpoint (default: f1_macro)")
+    parser.add_argument("--early-stopping-patience", type=int, default=3,
+                        help="Epochs without improvement before stopping (default: 3)")
     parser.add_argument("--far-threshold", type=float, default=1e-4)
     args = parser.parse_args()
 
@@ -168,6 +170,7 @@ def main():
 
     # --- Training loop ---
     best_metric, best_epoch = -1., 0
+    epochs_without_improvement = 0
     history = []
 
     for epoch in range(1, args.epochs + 1):
@@ -214,8 +217,14 @@ def main():
         current = val_metrics[args.early_stopping_metric]
         if current > best_metric:
             best_metric, best_epoch = current, epoch
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), output_dir / "best_model.pt")
             print(f"  → saved (val_{args.early_stopping_metric}={best_metric:.4f})")
+        else:
+            epochs_without_improvement += 1
+            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                print(f"Early stopping: no improvement for {epochs_without_improvement} epochs")
+                break
 
     print(f"\nBest val_{args.early_stopping_metric}={best_metric:.4f} @ epoch {best_epoch}")
 

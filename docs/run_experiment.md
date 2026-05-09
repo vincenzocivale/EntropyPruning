@@ -45,13 +45,14 @@ Parametri modificabili:
 
 | Flag | Default | Note |
 |------|---------|------|
-| `--epochs` | 20 | |
+| `--epochs` | 20 | massimo numero di epoche |
 | `--batch-size` | 8 | abbassare in caso di OOM |
 | `--lora-r` | 8 | rank LoRA |
 | `--lora-alpha` | 32 | |
 | `--lr-backbone` | 1e-5 | |
 | `--lr-head` | 1e-3 | |
 | `--early-stopping-metric` | f1_macro | oppure `acc` |
+| `--early-stopping-patience` | 3 | epoche senza miglioramento prima di fermare; 0 = disabilitato |
 
 ---
 
@@ -158,6 +159,32 @@ bash /home/oem/EAF/EntropyPruning/scripts/run_lora_experiments.sh
 ```
 
 Log in: `/data/EAF_data/thunder/logs/lora_experiments/`
+
+### Personalizzare batch size e early stopping
+
+Lo script usa valori di default, ma puoi sovrescriverli:
+
+```bash
+# Aumentare batch size a 16
+BATCH_SIZE=16 bash scripts/run_lora_experiments.sh
+
+# Disabilitare early stopping (il trainer farà tutte le epoche)
+BATCH_SIZE=16 EARLY_STOPPING_PATIENCE=0 bash scripts/run_lora_experiments.sh
+
+# O modificare il batch size per una singola fase manualmente:
+$PYTHON $SCRIPTS/train_classifier.py \
+    --model-name $MODEL \
+    --dataset-name $DATASET \
+    --base-data-folder $BASE_DATA \
+    --adaptation lora \
+    --output-dir $CKPT/${MODEL}_lora \
+    --batch-size 32 \
+    --early-stopping-patience 5 \
+    --wandb-project eaf
+```
+
+L'early stopping ferma il training se non c'è miglioramento nella metrica scelta (`--early-stopping-metric`) 
+per N epoche consecutive (default: 3).
 
 ---
 

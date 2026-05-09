@@ -51,6 +51,8 @@ def main():
                         help="Phase 1 adaptation strategy — used only for baseline eval.")
     parser.add_argument("--eval-baseline", action="store_true",
                         help="Also benchmark the unpruned Phase 1 model on the test set.")
+    parser.add_argument("--early-stopping-patience", type=int, default=3,
+                        help="Epochs without improvement before stopping (default: 3)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -171,6 +173,7 @@ def main():
     best_val_f1 = 0.
     ckpt_name = f"best_{run_name}.pt"
     history = []
+    epochs_without_improvement = 0
 
     for epoch in range(args.epochs):
         model.train()
@@ -225,7 +228,13 @@ def main():
 
         if val_m["f1_macro"] > best_val_f1:
             best_val_f1 = val_m["f1_macro"]
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), output_dir / ckpt_name)
+        else:
+            epochs_without_improvement += 1
+            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                print(f"Early stopping: no improvement for {epochs_without_improvement} epochs")
+                break
 
         print(f"Ep {epoch+1:02d} | loss={row['train_loss']:.4f}  "
               f"gnorm={row['train_grad_norm']:.3f}  "

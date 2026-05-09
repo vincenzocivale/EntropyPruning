@@ -40,8 +40,12 @@ python scripts/train_classifier.py \
     --lr-head 1e-3 \
     --weight-decay 0.01 \
     --warmup-steps 100 \
-    --label-smoothing 0.1
+    --label-smoothing 0.1 \
+    --early-stopping-patience 3
 ```
+
+**Early stopping:** Ferma il training se la metrica scelta non migliora per N epoche consecutive (default: 3).
+Imposta `--early-stopping-patience 0` per disabilitarlo.
 
 **Output:** `checkpoints/$DATASET/${MODEL}_lora/best_model.pt`
 
@@ -122,8 +126,11 @@ python scripts/finetune_pruned.py \
     --lr-backbone 1e-4 \
     --lr-head 1e-3 \
     --wandb-project eaf-pruning \
-    --eval-baseline               # also evaluate unpruned model for comparison
+    --eval-baseline \             # also evaluate unpruned model for comparison
+    --early-stopping-patience 3
 ```
+
+**Early stopping:** Ferma il training se la metrica non migliora per N epoche consecutive (default: 3).
 
 **Output:** `checkpoints/$DATASET/${MODEL}_pruned/best_${MODEL}_prune2_keep10.pt`
 

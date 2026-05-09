@@ -2,19 +2,27 @@
 # Pipeline: Phase1 (LoRA) → Phase2 (Forecaster) → Phase3 (Pruned) x3 keep-ratios
 # Datasets: mhist, wilds, spider_colorectal
 # Pruning: 10% (keep=0.9), 20% (keep=0.8), 30% (keep=0.7)
+#!/bin/bash
+# Pipeline: Phase1 (LoRA) → Phase2 (Forecaster) → Phase3 (Pruned)
+
 set -euo pipefail
 
-PYTHON=/home/oem/EAF/EntropyPruning/.venv/bin/python
-THUNDER_CLI=/home/oem/EAF/EntropyPruning/.venv/bin/thunder
-SCRIPTS=/home/oem/EAF/EntropyPruning/scripts
-BASE_DATA=/data/EAF_data/thunder/datasets
-CKPT_BASE=/data/EAF_data/thunder/checkpoints
-LOG_DIR=/data/EAF_data/thunder/logs/lora_experiments
-MODEL=uni
-DATASETS=(mhist wilds spider_colorectal)
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate eaf_env
+
+PYTHON=$(which python)
+THUNDER_CLI=$(which thunder)
+SCRIPTS=/data2/home/vcivale/EntropyPruning/scripts
+BASE_DATA=/data2/home/vcivale/EntropyPruning/data/datasets
+CKPT_BASE=/data2/home/vcivale/EntropyPruning/data/checkpoints
+LOG_DIR=/data2/home/vcivale/EntropyPruning/data/logs/lora_experiments
+MODEL=uni2h
+DATASETS=(wilds)
 KEEP_RATIOS=(0.1 0.2 0.3)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
+BATCH_SIZE=${BATCH_SIZE:-8}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
+EARLY_STOPPING_PATIENCE=3
 
 mkdir -p "$LOG_DIR"
 
@@ -56,6 +64,8 @@ phase1() {
         --base-data-folder "$BASE_DATA" \
         --adaptation lora \
         --output-dir "$CKPT_BASE/$ds/${MODEL}_lora" \
+        --batch-size "$BATCH_SIZE" \
+        --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
         --wandb-project eaf \
         2>&1 | tee "$LOG_DIR/phase1_${MODEL}_${ds}.log"
     [ -f "$ckpt" ] || die "Phase1 $ds did not produce $ckpt"
@@ -116,6 +126,8 @@ phase3() {
         --output-dir "$CKPT_BASE/$ds/${MODEL}_pruned_lora" \
         --prune-layer "$PRUNE_LAYER" \
         --keep-ratio "$keep_ratio" \
+        --batch-size "$BATCH_SIZE" \
+        --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
         --eval-baseline \
         --wandb-project eaf \
         2>&1 | tee "$LOG_DIR/phase3_${MODEL}_${ds}_keep${keep_pct}.log"
