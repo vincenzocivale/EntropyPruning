@@ -98,9 +98,16 @@ def main():
                   "phase3"],
         )
 
-    # --- Optional baseline benchmark ---
+    # --- Optional baseline benchmark (cached) ---
     baseline_results = {}
-    if args.eval_baseline:
+    baseline_cache_file = output_dir / "baseline_results.json"
+
+    if baseline_cache_file.exists():
+        # Load cached baseline results
+        baseline_results = json.load(open(baseline_cache_file))
+        print(f"Loaded cached baseline results from {baseline_cache_file}")
+    elif args.eval_baseline:
+        # Compute baseline and cache it
         baseline = build_classifier(args.adaptation, raw_backbone, adapter, n_classes).to(device)
         baseline.load_state_dict(
             torch.load(classifier_ckpt, map_location=device), strict=False)
@@ -115,6 +122,8 @@ def main():
             "baseline_ms_per_img": round(bl_b["ms_per_img"], 3),
             "baseline_gflops": bl_b["gflops"],
         }
+        # Cache baseline results for future runs
+        json.dump(baseline_results, open(baseline_cache_file, "w"), indent=2)
         print(f"\n-- Baseline --  acc={bl_m['acc']:.3f}  f1={bl_m['f1_macro']:.3f}  "
               f"ms/img={bl_b['ms_per_img']:.2f}  GFLOPs={bl_b['gflops']}")
         if use_wandb:

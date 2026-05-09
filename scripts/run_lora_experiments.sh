@@ -1,11 +1,9 @@
 #!/bin/bash
-# Pipeline: Phase1 (LoRA) → Phase2 (Forecaster) → Phase3 (Pruned) x3 keep-ratios
-# Datasets: mhist, wilds, spider_colorectal
-# Pruning: 10% (keep=0.9), 20% (keep=0.8), 30% (keep=0.7)
-#!/bin/bash
 # Pipeline: Phase1 (LoRA) → Phase2 (Forecaster) → Phase3 (Pruned)
+# Pruning: 10% (keep=0.1), 20% (keep=0.2), 30% (keep=0.3)
 
 set -euo pipefail
+set +u  # Allow unbound variables during conda activation
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate eaf_env
@@ -16,12 +14,14 @@ SCRIPTS=/data2/home/vcivale/EntropyPruning/scripts
 BASE_DATA=/data2/home/vcivale/EntropyPruning/data/datasets
 CKPT_BASE=/data2/home/vcivale/EntropyPruning/data/checkpoints
 LOG_DIR=/data2/home/vcivale/EntropyPruning/data/logs/lora_experiments
+
+export THUNDER_BASE_DATA_FOLDER=/data2/home/vcivale/EntropyPruning/data
 MODEL=uni2h
 DATASETS=(wilds)
 KEEP_RATIOS=(0.1 0.2 0.3)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
-BATCH_SIZE=${BATCH_SIZE:-8}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
+BATCH_SIZE=${BATCH_SIZE:-32}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
 EARLY_STOPPING_PATIENCE=3
 
 mkdir -p "$LOG_DIR"
