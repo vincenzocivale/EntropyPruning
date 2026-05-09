@@ -1,8 +1,18 @@
-"""Phase 1: Train CropR on a Thunder foundation model and dataset."""
+"""Train CropR on a Thunder foundation model and dataset."""
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
+
+# transformers' get_cosine_schedule_with_warmup calls step() during __init__,
+# which triggers a spurious PyTorch ordering warning. The actual call order in
+# the training loop is correct (optimizer.step → scheduler.step).
+warnings.filterwarnings(
+    "ignore",
+    message="Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`",
+    category=UserWarning,
+)
 
 import torch
 import torch.nn as nn
