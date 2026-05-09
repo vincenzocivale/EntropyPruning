@@ -16,9 +16,9 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, grad_norm, save_results
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
-                        ThunderBackboneAdapter, build_classifier, STRATEGIES)
+                        ThunderBackboneAdapter, STRATEGIES)
 from src.data.thunder_loaders import build_thunder_loaders
-from src.evaluation import evaluate, benchmark_model
+from src.evaluation import evaluate
 
 
 def main():
@@ -48,9 +48,7 @@ def main():
     parser.add_argument("--wandb-project", type=str, default=None,
                         help="W&B project name (default: None = skip W&B).")
     parser.add_argument("--adaptation", type=str, default="lora", choices=STRATEGIES,
-                        help="Phase 1 adaptation strategy — used only for baseline eval.")
-    parser.add_argument("--eval-baseline", action="store_true",
-                        help="Also benchmark the unpruned Phase 1 model on the test set.")
+                        help="Phase 1 adaptation strategy.")
     parser.add_argument("--early-stopping-patience", type=int, default=3,
                         help="Epochs without improvement before stopping (default: 3)")
     args = parser.parse_args()
@@ -98,43 +96,6 @@ def main():
                   "phase3"],
         )
 
-    # --- Optional baseline benchmark (cached) ---
-    baseline_results = {}
-    baseline_cache_file = output_dir / "baseline_results.json"
-
-    if baseline_cache_file.exists():
-        # Load cached baseline results
-        baseline_results = json.load(open(baseline_cache_file))
-        print(f"Loaded cached baseline results from {baseline_cache_file}")
-    elif args.eval_baseline:
-        # Compute baseline and cache it
-        baseline = build_classifier(args.adaptation, raw_backbone, adapter, n_classes).to(device)
-        baseline.load_state_dict(
-            torch.load(classifier_ckpt, map_location=device), strict=False)
-        baseline.eval()
-        for p in baseline.parameters():
-            p.requires_grad_(False)
-        bl_m = evaluate(baseline, test_loader, device, args.far_threshold)
-        bl_b = benchmark_model(baseline, test_loader, device, label="Baseline (no pruning)")
-        baseline_results = {
-            "baseline_acc": round(float(bl_m["acc"]), 6),
-            "baseline_f1_macro": round(float(bl_m["f1_macro"]), 6),
-            "baseline_ms_per_img": round(bl_b["ms_per_img"], 3),
-            "baseline_gflops": bl_b["gflops"],
-        }
-        # Cache baseline results for future runs
-        json.dump(baseline_results, open(baseline_cache_file, "w"), indent=2)
-        print(f"\n-- Baseline --  acc={bl_m['acc']:.3f}  f1={bl_m['f1_macro']:.3f}  "
-              f"ms/img={bl_b['ms_per_img']:.2f}  GFLOPs={bl_b['gflops']}")
-        if use_wandb:
-            wandb.log({
-                "test/acc": baseline_results["baseline_acc"],
-                "test/f1_macro": baseline_results["baseline_f1_macro"],
-                "test/ms_per_img": baseline_results["baseline_ms_per_img"],
-                "test/gflops": baseline_results["baseline_gflops"],
-            }, step=0)
-        del baseline
-
     # --- Forecaster ---
     forecaster = AttentionForecaster(
         embed_dim=adapter.embed_dim,
@@ -162,7 +123,6 @@ def main():
         wandb.config.update({
             "pre_val_acc": pre["acc"],
             "pre_val_f1_macro": pre["f1_macro"],
-            **baseline_results,
         })
 
     # --- Optimizer (AMP) ---
@@ -253,14 +213,9 @@ def main():
     model.load_state_dict(torch.load(output_dir / ckpt_name, map_location=device))
     model.eval()
     test_m = evaluate(model, test_loader, device, args.far_threshold)
-    test_b = benchmark_model(
-        model, test_loader, device,
-        label=f"Pruned ({args.model_name}, layer={args.prune_layer}, "
-              f"keep={int(args.keep_ratio * 100)}%)")
 
     print(f"\n-- Test --  acc={test_m['acc']:.3f}  f1={test_m['f1_macro']:.3f}  "
-          f"TAR@FAR={test_m['tar_at_far']:.3f}  "
-          f"ms/img={test_b['ms_per_img']:.2f}  GFLOPs={test_b['gflops']}")
+          f"TAR@FAR={test_m['tar_at_far']:.3f}")
 
     # --- Persist results ---
     results = {
@@ -275,9 +230,6 @@ def main():
         "test_acc": round(float(test_m["acc"]), 6),
         "test_f1_macro": round(float(test_m["f1_macro"]), 6),
         "test_tar_at_far": round(float(test_m["tar_at_far"]), 6),
-        "test_ms_per_img": round(test_b["ms_per_img"], 3),
-        "test_gflops": test_b["gflops"],
-        **baseline_results,
         "args": vars(args),
     }
     path = save_results(output_dir / f"results_{run_name}.json", results)
@@ -288,8 +240,6 @@ def main():
             "test/acc": test_m["acc"],
             "test/f1_macro": test_m["f1_macro"],
             "test/tar_at_far": test_m["tar_at_far"],
-            "test/ms_per_img": test_b["ms_per_img"],
-            "test/gflops": test_b["gflops"],
             "val/best_f1_macro": best_val_f1,
         }, step=args.epochs)
         wandb.finish()
