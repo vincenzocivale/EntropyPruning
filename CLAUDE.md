@@ -14,9 +14,8 @@ conda env create -f environment.yml && conda activate trident
 
 ## Paths
 
-- **Datasets + checkpoints:** `/dune/DATASETS/EAF_results/`
+- **Base data folder:** `/dune/DATASETS/EAF_results/datasets` (contains `data_splits/` and dataset dirs)
 - **Pretrained model weights:** `/dune/DATASETS/EAF_results/pretrained_ckpts/`
-- **Data splits:** `/dune/DATASETS/EAF_results/datasets/data_splits/`
 - **Output checkpoints:** `/dune/DATASETS/EAF_results/checkpoints/`
 
 Set the required env var before any command:
@@ -28,7 +27,7 @@ export THUNDER_BASE_DATA_FOLDER=/dune/DATASETS/EAF_results
 
 **Models (pretrained weights present):** `uni`, `uni2h`
 
-**Datasets:** `esca`, `patch_camelyon`, `spider_colorectal`, `tcga_crc_msi`, `tcga_uniform`, `wilds`
+**Datasets (data split present):** `patch_camelyon`, `spider_colorectal`, `tcga_crc_msi`
 
 ## Training
 
@@ -38,7 +37,7 @@ export THUNDER_BASE_DATA_FOLDER=/dune/DATASETS/EAF_results
 python scripts/train_cropr.py \
   --model-name uni \
   --dataset-name patch_camelyon \
-  --base-data-folder /dune/DATASETS/EAF_results \
+  --base-data-folder /dune/DATASETS/EAF_results/datasets \
   --pruning-rate 8 \
   --epochs 30 \
   --batch-size 32 \
