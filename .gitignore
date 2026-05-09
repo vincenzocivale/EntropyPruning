@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 data/
+scripts/run_lora_experiments.sh
