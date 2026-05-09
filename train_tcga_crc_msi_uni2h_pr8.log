@@ -1,0 +1,6 @@
+nohup: ignoring input
+/home/vcivale/.conda/envs/pruning_env/lib/python3.10/site-packages/outdated/__init__.py:36: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import parse_version
+/home/vcivale/.conda/envs/pruning_env/lib/python3.10/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+2026-05-09 23:02:52,135 - INFO - HTTP Request: HEAD https://huggingface.co/MahmoodLab/UNI2-h/resolve/main/config.json "HTTP/1.1 200 OK"
