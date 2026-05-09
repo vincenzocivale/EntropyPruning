@@ -2,95 +2,83 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repository Structure
+## Project Overview
 
-This workspace contains two independent projects for computational pathology:
+This branch (`cropr-evaluation`) evaluates **CropR** — a progressive token pruning method — applied to pre-trained Thunder histopathology foundation models.  CropR inserts lightweight cross-attention scorer modules between transformer blocks and progressively drops the lowest-scoring patch tokens, reducing compute while preserving classification accuracy.
 
-- **`EntropyPruning/`** — ViT token pruning framework for efficient histopathology inference. Has its own `CLAUDE.md` with full details.
-- **`thunder/`** — THUNDER benchmark (NeurIPS 2025 Spotlight): evaluates 23 foundation models across 16 datasets and 9+ task types. Published as `thunder-bench` on PyPI.
-
----
-
-## EntropyPruning
-
-See `EntropyPruning/CLAUDE.md` for the full training pipeline, architecture, and dataset paths. Summary:
-
-- **Environment:** `conda env create -f EntropyPruning/environment.yml && conda activate trident`
-- **Three-phase pipeline:** (1) LoRA fine-tune classifier, (2) train AttentionForecaster, (3) fine-tune pruned model
-- **Datasets** at `/raid/DATASETS/`; HDF5 cache at `/raid/DATASETS/data_cache/`; checkpoints at `/raid/DATASETS/checkpoints-Attention-Pruning/`
-
----
-
-## THUNDER (`thunder/`)
-
-### Setup
+## Environment
 
 ```bash
-cd thunder
-pip install -e ".[dev]"
+conda env create -f environment.yml && conda activate trident
 ```
 
-### Common Commands
+## Paths
+
+- **Datasets + checkpoints:** `/dune/DATASETS/EAF_results/`
+- **Pretrained model weights:** `/dune/DATASETS/EAF_results/pretrained_ckpts/`
+- **Data splits:** `/dune/DATASETS/EAF_results/datasets/data_splits/`
+- **Output checkpoints:** `/dune/DATASETS/EAF_results/checkpoints/`
+
+Set the required env var before any command:
+```bash
+export THUNDER_BASE_DATA_FOLDER=/dune/DATASETS/EAF_results
+```
+
+## Available models and datasets
+
+**Models (pretrained weights present):** `uni`, `uni2h`
+
+**Datasets:** `esca`, `patch_camelyon`, `spider_colorectal`, `tcga_crc_msi`, `tcga_uniform`, `wilds`
+
+## Training
 
 ```bash
-# Run a benchmark (CLI)
-thunder benchmark <model> <dataset> <task>
+export THUNDER_BASE_DATA_FOLDER=/dune/DATASETS/EAF_results
 
-# Examples
-thunder benchmark phikon break_his knn_classification
-thunder benchmark uni crc linear_probing
-thunder benchmark keep spider_breast zero_shot_vlm
-
-# Download a dataset
-thunder download <dataset>
-
-# Run tests
-pytest
-
-# Lint
-black src/ tests/
-isort src/ tests/
-
-# Build docs
-mkdocs serve
+python scripts/train_cropr.py \
+  --model-name uni \
+  --dataset-name patch_camelyon \
+  --base-data-folder /dune/DATASETS/EAF_results \
+  --pruning-rate 8 \
+  --epochs 30 \
+  --batch-size 32 \
+  --output-dir /dune/DATASETS/EAF_results/checkpoints/patch_camelyon/uni_cropr_pr8
 ```
 
-### Python API
+Key flags:
+- `--freeze-backbone` — train only CropR modules + head (backbone frozen); default uses LoRA
+- `--pruning-rate N` — tokens removed per block; with UNI (196 patches, 24 blocks, 23 CropR modules) `--pruning-rate 8` leaves ~12 tokens before the final block
+- `--wandb-project <name>` — enable W&B logging (omit to skip)
+- `--lora-r / --lora-alpha` — LoRA rank/alpha for backbone adaptation (ignored with `--freeze-backbone`)
 
-```python
-from thunder import benchmark
-benchmark("phikon", "break_his", "knn")
+Supported models (timm-based, `num_prefix_tokens=1`): `uni`, `uni2h`, `hoptimus0`, `hoptimus1`, `virchow`, `virchow2`, `h0mini`, `kaiko_vit*`, `dinov2base`, `dinov2large`.
 
-from thunder.models import get_model_from_name
-model, transforms = get_model_from_name("uni")
-```
+Supported datasets: any Thunder classification dataset (`crc`, `mhist`, `break_his`, `patch_camelyon`, etc.) except `bracs`.
 
-### Architecture
+## Architecture
 
-**Entry point:** `src/thunder/main.py` (Typer CLI) → `src/thunder/benchmark.py` (core logic)
+### `src/models/cropr_classifier.py` — `CroprClassifier`
 
-**Task types** (`src/thunder/tasks/`):
-- `knn_classification` — k-NN on frozen embeddings
-- `linear_probing` — linear head on frozen embeddings
-- `simple_shot` — few-shot learning
-- `image_retrieval` — similarity-based retrieval
-- `adversarial_attack` — PGD robustness evaluation
-- `transformation_invariance` — RandStain augmentation robustness
-- `alignment_scoring` — feature alignment metrics
-- `segmentation` — dense prediction
-- `zero_shot_vlm` — VLM zero-shot classification (VLMs only: CONCH, KEEP, PLIP, MUSK, TITAN)
+Wraps a pre-trained timm ViT backbone and inserts one `Cropr` module after each transformer block except the last.
 
-**Model zoo** (`src/thunder/models/pretrained_models.py`): 23 models including UNI, Virchow, H-optimus, Phikon, Hibou, DINOv2, CLIP, PLIP, CONCH, KEEP. Some require accepting HuggingFace usage terms before use.
+**Forward pass:**
+1. `patch_embed` → `_pos_embed` → `patch_drop` → `norm_pre`
+2. For each block i (0..n-2): run block → `Cropr[i]` prunes lowest-scoring patch tokens → continue
+3. Run final block (no pruning) → `norm` → pool → `fc_norm` → classification head
 
-**Configuration system:** Hydra YAML configs in `src/thunder/config/`. Subcategories: `task/`, `model/`, `dataset/`, `adaptation/` (LoRA vs frozen), `data_loading/` (online / image pre-loading / embedding pre-loading), `wandb/`.
+**Training output:** `[main_logits, aux_0, ..., aux_{n-2}]` — `train_cropr.py` sums CE losses over all heads.
+**Eval output:** `main_logits` only (Cropr intermediate heads return `None` at inference).
 
-**Data loading modes** (`data_loading` config key):
-- `online_loading` — stream images on demand
-- `image_pre_loading` — load all images to RAM
-- `embedding_pre_loading` — use pre-computed HDF5 embeddings (fastest)
+**Backbone adaptation:** frozen (`--freeze-backbone`) or LoRA (`target_modules: qkv, proj, fc1, fc2`). The `raw_backbone` property always returns the unwrapped timm model for block-level access, regardless of peft wrapping.
 
-**Custom models/datasets:** Provide a Python class implementing the model interface or a YAML dataset config. See `examples/` for `dinov2small.py`, `resnet.py`, `bracs_3classes.yaml`.
+### `src/baselines/cropr/cropr.py` — `Cropr` (original, unmodified)
 
-**Datasets** (`src/thunder/datasets/`): 16 base datasets (BACH, BRACS, BreakHIS, CCRCC, CRC, ESCA, MHist, OCELOT, PanNuke, Patch-Camelyon, SegPath variants, TCGA variants, WILDS) plus SPIDER variants (breast, colorectal, skin, thorax).
+Cross-attention scorer + pruning module.  `scores[:, 0] = math.inf` protects the CLS token at position 0.  During training uses `x.detach()` so auxiliary loss gradients do not flow into the backbone; only the main classification loss reaches backbone weights.
 
-**Test suite:** `tests/test_benchmark.py`, `tests/test_datasets.py`, `tests/test_models.py`. CI runs on Python 3.10–3.13 with offline wandb (`WANDB_MODE=offline`).
+### `src/data/thunder_loaders.py` — `build_thunder_loaders`
+
+Wraps Thunder's `get_data()` into `(train_loader, val_loader, test_loader, class_names, n_classes)`. Training uses `WeightedRandomSampler` for class balance.
+
+### `src/evaluation/metrics.py` — `evaluate`
+
+`evaluate(model, loader, device, far_threshold)` → `{acc, f1_macro, tar_at_far, threshold}`. Calls `model(x)` and expects a plain logit tensor — compatible with `CroprClassifier` in eval mode.
