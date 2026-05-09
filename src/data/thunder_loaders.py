@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -22,7 +23,8 @@ class _TupleDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self._ds[idx]
-        return item["image"], torch.tensor(item["label"], dtype=torch.long)
+        label = np.asarray(item["label"]).reshape(()).item()
+        return item["image"], torch.tensor(label, dtype=torch.long)
 
 
 def build_thunder_loaders(
@@ -72,10 +74,12 @@ def build_thunder_loaders(
     dataset_cfg_path = (
         Path(thunder.__file__).parent / "config" / "dataset" / f"{dataset_name}.yaml"
     )
+    h5_format = False
     if dataset_cfg_path.exists():
         cfg = OmegaConf.load(dataset_cfg_path)
         class_names = list(cfg.classes)
         n_classes = int(cfg.nb_classes)
+        h5_format = bool(getattr(cfg, "h5_format", False))
     else:
         all_labels = data["train"]["labels"]
         n_classes = max(all_labels) + 1
@@ -92,13 +96,19 @@ def build_thunder_loaders(
             embeddings_folder=None,
             image_pre_loading=False,
             embedding_pre_loading=False,
+            h5_format=h5_format,
         ))
 
     train_ds = _make_ds("train")
     val_ds   = _make_ds("val")
     test_ds  = _make_ds("test")
 
-    train_labels = np.array(data["train"]["labels"])
+    if h5_format:
+        labels_path = Path(base_data_folder) / dataset_name / data["train"]["labels"]
+        with h5py.File(labels_path, "r") as f:
+            train_labels = np.array(f["y"]).reshape(-1).astype(int)
+    else:
+        train_labels = np.array(data["train"]["labels"]).flatten().astype(int)
     counts = np.bincount(train_labels)
     sample_weights = torch.from_numpy((1.0 / counts)[train_labels]).double()
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)

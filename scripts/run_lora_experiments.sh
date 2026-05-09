@@ -10,14 +10,14 @@ conda activate eaf_env
 
 PYTHON=$(which python)
 THUNDER_CLI=$(which thunder)
-SCRIPTS=/data2/home/vcivale/EntropyPruning/scripts
-BASE_DATA=/data2/home/vcivale/EntropyPruning/data/datasets
-CKPT_BASE=/data2/home/vcivale/EntropyPruning/data/checkpoints
-LOG_DIR=/data2/home/vcivale/EntropyPruning/data/logs/lora_experiments
+SCRIPTS=/home/vcivale/EntropyPruning/scripts
+BASE_DATA=/raid/DATASETS/EAF_results/datasets
+CKPT_BASE=/raid/DATASETS/EAF_results/checkpoints
+LOG_DIR=/raid/DATASETS/EAF_results/logs/lora_experiments
 
-export THUNDER_BASE_DATA_FOLDER=/data2/home/vcivale/EntropyPruning/data
-MODEL=uni2h
-DATASETS=(wilds)
+export THUNDER_BASE_DATA_FOLDER=/raid/DATASETS/EAF_results
+MODEL=uni
+DATASETS=(patch_camelyon)
 KEEP_RATIOS=(0.1 0.2 0.3)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
@@ -128,7 +128,6 @@ phase3() {
         --keep-ratio "$keep_ratio" \
         --batch-size "$BATCH_SIZE" \
         --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-        --eval-baseline \
         --wandb-project eaf \
         2>&1 | tee "$LOG_DIR/phase3_${MODEL}_${ds}_keep${keep_pct}.log"
     [ -f "$result_file" ] || die "Phase3 $ds keep${keep_pct} did not produce $result_file"
