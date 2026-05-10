@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 from tqdm.auto import tqdm
+from collections import OrderedDict
 
 from trident import load_wsi
 from trident.wsi_objects.WSIPatcher import WSIPatcher
@@ -26,6 +27,7 @@ class WSITileDataset(Dataset):
         seed=42,
         verbose=False,
         use_cache=True,
+        cache_memory_limit_gb=4.0,
     ):
         """
         Args:
@@ -37,6 +39,7 @@ class WSITileDataset(Dataset):
             seed: random seed for reproducible sampling (default: 42)
             verbose: print progress (default: False)
             use_cache: cache tile tensors in RAM after first full pass (default: True)
+            cache_memory_limit_gb: max memory for tile cache in GB (default: 4.0, 0 = unlimited)
         """
         self.wsi_paths = [str(p) for p in wsi_paths]
         self.transform = transform
@@ -46,11 +49,14 @@ class WSITileDataset(Dataset):
         self.seed = seed
         self.verbose = verbose
         self.use_cache = use_cache
+        self.cache_memory_limit_gb = cache_memory_limit_gb
+        self.cache_memory_limit_bytes = int(cache_memory_limit_gb * 1e9)
 
         self.rng = np.random.RandomState(seed)
         self.patchers = []
         self.tile_indices = []  # per-WSI list of randomly selected tile indices
-        self.tile_cache = {}  # global cache: (wsi_idx, tile_idx) -> tensor
+        self.tile_cache = OrderedDict()  # LRU cache: (wsi_idx, tile_idx) -> tensor
+        self.cache_bytes_used = 0  # track memory usage
         self.first_pass_complete = False
 
         # Load WSI files and build patchers
@@ -118,9 +124,10 @@ class WSITileDataset(Dataset):
         wsi_idx = idx // self.tiles_per_wsi
         tile_local_idx = idx % self.tiles_per_wsi
 
-        # Check cache first
+        # Check cache first (move to end for LRU)
         cache_key = (wsi_idx, tile_local_idx)
         if cache_key in self.tile_cache:
+            self.tile_cache.move_to_end(cache_key)  # Mark as recently used
             return self.tile_cache[cache_key]
 
         # Load tile from patcher
@@ -133,9 +140,44 @@ class WSITileDataset(Dataset):
 
         # Cache if enabled and first pass is complete
         if self.use_cache and self.first_pass_complete:
-            self.tile_cache[cache_key] = tile_tensor
+            self._add_to_cache(cache_key, tile_tensor)
 
         return tile_tensor
+
+    def _add_to_cache(self, cache_key, tile_tensor):
+        """
+        Add tile to cache with LRU eviction if memory limit exceeded.
+
+        Args:
+            cache_key: (wsi_idx, tile_idx)
+            tile_tensor: tensor to cache
+        """
+        # Estimate memory size (rough: tensor size in bytes)
+        tensor_bytes = tile_tensor.element_size() * tile_tensor.nelement()
+
+        # Check if adding would exceed memory limit
+        if (
+            self.cache_memory_limit_bytes > 0
+            and self.cache_bytes_used + tensor_bytes > self.cache_memory_limit_bytes
+        ):
+            # Evict oldest (first) item
+            if self.tile_cache:
+                evicted_key, evicted_tensor = self.tile_cache.popitem(last=False)
+                evicted_bytes = evicted_tensor.element_size() * evicted_tensor.nelement()
+                self.cache_bytes_used -= evicted_bytes
+                if self.verbose:
+                    print(
+                        f"  Cache evicted {evicted_key}, used: {self.cache_bytes_used / 1e9:.2f} GB"
+                    )
+
+        # Add new item
+        self.tile_cache[cache_key] = tile_tensor
+        self.cache_bytes_used += tensor_bytes
+
+        if self.verbose and len(self.tile_cache) % 100 == 0:
+            print(
+                f"  Cache size: {len(self.tile_cache)} tiles, {self.cache_bytes_used / 1e9:.2f} GB / {self.cache_memory_limit_gb:.1f} GB"
+            )
 
     def mark_epoch_complete(self):
         """
@@ -149,6 +191,7 @@ class WSITileDataset(Dataset):
     def clear_cache(self):
         """Clear the tile tensor cache."""
         self.tile_cache.clear()
+        self.cache_bytes_used = 0
         self.first_pass_complete = False
 
     @property
