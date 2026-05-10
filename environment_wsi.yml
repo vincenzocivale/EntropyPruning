@@ -25,10 +25,6 @@ dependencies:
     - h5py==3.13.0
     # Monitoring
     - wandb==0.19.11
-    # Benchmarking
-    - fvcore==0.1.5
-    # Token merging baseline
-    - tome==0.1
     # Training utilities
     - lightning==2.5.1
     # Core libraries
