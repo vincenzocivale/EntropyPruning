@@ -13,7 +13,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from thunder.models.pretrained_models import get_model_from_name
+from trident.patch_encoder_models import encoder_factory
 
 from src.utils import get_device, set_seed
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
@@ -77,7 +77,9 @@ def evaluate_one(
     set_seed(seed)
     device = get_device()
 
-    raw_backbone, transform, _ = get_model_from_name(model_name, str(device))
+    enc = encoder_factory(model_name)
+    raw_backbone = enc.model
+    transform = enc.eval_transforms
     adapter = ThunderBackboneAdapter(raw_backbone)
 
     _, _, test_loader, _, n_classes = build_thunder_loaders(

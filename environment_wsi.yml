@@ -1,0 +1,57 @@
+name: eaf-wsi
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    # Deep learning core
+    - torch==2.6.0
+    - torchvision==0.21.0
+    - torchao==0.11.0
+    # LoRA finetuning
+    - peft==0.18.1
+    - transformers==4.51.3
+    - accelerate==1.12.0
+    # Vision models
+    - timm==1.0.25  # Note: TRIDENT requires 0.9.16 but installs with --no-deps
+    - einops==0.8.1
+    # ML utilities
+    - scikit-learn==1.5.2
+    - scipy
+    - h5py==3.13.0
+    # Monitoring
+    - wandb==0.19.11
+    # Benchmarking
+    - fvcore==0.1.5
+    # Token merging baseline
+    - tome==0.1
+    # Training utilities
+    - lightning==2.5.1
+    # Core libraries
+    - tqdm
+    - numpy
+    - pandas
+    - matplotlib
+    - Pillow
+    - huggingface-hub
+    - datasets
+    # WSI reading
+    - openslide-python
+    # Geopandas for tissue contours
+    - geopandas
+    - shapely
+
+# After env creation, install TRIDENT and Patho-Bench:
+# conda activate eaf-wsi
+# pip install -e /home/vcivale/EAF_WSI/TRIDENT --no-deps
+# pip install -e /home/vcivale/EAF_WSI/Patho-Bench
+#
+# Note on version compatibility:
+# - TRIDENT specifies timm==0.9.16 in its pyproject.toml
+# - EAF uses timm==1.0.25 for backbone compatibility
+# - Installing TRIDENT with --no-deps keeps timm==1.0.25
+# - TRIDENT's encoder loading (HF transformers-based) is compatible with timm 1.0.25

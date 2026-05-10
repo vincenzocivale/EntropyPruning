@@ -15,7 +15,7 @@ import wandb
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from thunder.models.pretrained_models import get_model_from_name
+from trident.patch_encoder_models import encoder_factory
 
 from src.utils import set_seed, get_device, save_results
 from src.models import AttentionForecaster, ThunderBackboneAdapter, build_classifier, STRATEGIES
@@ -184,7 +184,9 @@ def main():
     device = get_device()
     print(f"Device: {device} | Model: {args.model_name} | Dataset: {args.dataset_name}")
 
-    raw_backbone, transform, _ = get_model_from_name(args.model_name, str(device))
+    enc = encoder_factory(args.model_name)
+    raw_backbone = enc.model
+    transform = enc.eval_transforms
     adapter = ThunderBackboneAdapter(raw_backbone)
     print(f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
           f"n_patches={adapter.n_patches}  prefix={adapter.num_prefix_tokens}")

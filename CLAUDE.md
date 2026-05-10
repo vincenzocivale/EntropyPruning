@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Branch: `wsi-eval` (NEW)
+
+**Status**: Replaces `thunder` dependency with TRIDENT. Adds WSI-level evaluation pipeline.
+
+**3-Phase WSI Pipeline**:
+- **Phase 1** (`scripts/wsi_train_forecaster.py`): Train AttentionForecaster on WSI tiles (self-supervised, no labels)
+- **Phase 2** (`scripts/wsi_distill_pruned.py`): Distillation fine-tune of pruned encoder (teacher = non-pruned, student = pruned + LoRA)
+- **Phase 3** (`scripts/wsi_evaluate.py`): In-memory WSI classification comparison (Patho-Bench task, no HDF5)
+
+**Setup**: `conda env create -f environment_wsi.yml` then `pip install -e /path/to/TRIDENT --no-deps && pip install -e /path/to/Patho-Bench`
+
+**Quick start**:
+```bash
+python scripts/run_wsi_pipeline.py \
+  --encoder uni_v1 --dataset TCGA-BRCA --task subtype \
+  --wsi-dir /path/to/wsis --output-dir ./results \
+  --prune-layer 4 --keep-ratio 0.5
+```
+
+Key files: `src/data/wsi_tile_dataset.py` (streaming tiles), `src/models/backbone_adapter.py` (TRIDENT support), all scripts use `encoder_factory` from TRIDENT (no `thunder` imports).
+
 ## Repository Structure
 
 This workspace contains two independent projects for computational pathology:

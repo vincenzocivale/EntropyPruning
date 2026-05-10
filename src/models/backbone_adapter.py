@@ -1,18 +1,22 @@
 import torch.nn as nn
 
 
-class ThunderBackboneAdapter:
+class BackboneAdapter:
     """
-    Wraps a timm-based backbone from Thunder's get_model_from_name and exposes
-    uniform attributes and accessors for EAF's 3-phase pipeline.
+    Wraps a timm-based backbone and exposes uniform attributes for EAF's pipeline.
+
+    Accepts either:
+    - A raw timm VisionTransformer (e.g., from TRIDENT's encoder_factory(...).model)
+    - A TRIDENT encoder object (extracts .model automatically)
+    - A Thunder backbone (for backward compatibility)
 
     Supports timm-based ViT models (standard Block with Attention):
-      uni, uni2h, hoptimus0, hoptimus1, virchow, virchow2, h0mini,
-      kaiko_vit*, dinov2base, dinov2large.
+      uni_v1, uni_v2, hoptimus0, hoptimus1, virchow, virchow2, h0-mini,
+      kaiko-vit*, dinov2base, dinov2large, etc.
     Raises NotImplementedError for HuggingFace-based models (phikon, hibou).
 
     Args:
-        model: raw backbone from get_model_from_name (first element of the tuple).
+        model: raw timm backbone or TRIDENT encoder object (with .model attribute).
 
     Attributes:
         embed_dim (int):          Token embedding dimension.
@@ -22,11 +26,14 @@ class ThunderBackboneAdapter:
     """
 
     def __init__(self, model: nn.Module):
+        if hasattr(model, "model") and hasattr(model.model, "embed_dim"):
+            model = model.model
+
         if not self._detect_timm(model):
             raise NotImplementedError(
-                f"ThunderBackboneAdapter: '{type(model).__name__}' is not a supported "
-                "timm VisionTransformer. Supported: uni, uni2h, hoptimus0/1, "
-                "virchow, virchow2, h0mini, kaiko_vit*, dinov2base, dinov2large. "
+                f"BackboneAdapter: '{type(model).__name__}' is not a supported "
+                "timm VisionTransformer. Supported: uni_v1, uni_v2, hoptimus0/1, "
+                "virchow, virchow2, h0-mini, kaiko-vit*, dinov2base, dinov2large. "
                 "HuggingFace-based models (phikon, hibou) are not yet supported."
             )
         self.model = model
@@ -64,3 +71,18 @@ class ThunderBackboneAdapter:
                 "Expected standard timm Attention."
             )
         return attn
+
+    @classmethod
+    def from_trident(cls, encoder):
+        """Convenience constructor for TRIDENT encoder objects.
+
+        Args:
+            encoder: TRIDENT encoder from encoder_factory(model_name)
+
+        Returns:
+            BackboneAdapter wrapping encoder.model
+        """
+        return cls(encoder.model)
+
+
+ThunderBackboneAdapter = BackboneAdapter

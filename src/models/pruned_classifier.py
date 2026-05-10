@@ -15,7 +15,7 @@ class GenericLoRAWithForecasterPruning(nn.Module):
     remaining blocks. Prefix tokens (CLS + register tokens) are always preserved.
 
     Args:
-        backbone:    raw timm model from thunder's get_model_from_name.
+        backbone:    raw timm backbone model.
         adapter:     ThunderBackboneAdapter for backbone.
         n_classes:   number of output classes.
         forecaster:  trained AttentionForecaster (must be frozen before passing in).

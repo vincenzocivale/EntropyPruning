@@ -1,4 +1,4 @@
-"""Phase 1: Train a classifier on a Thunder backbone using a configurable adaptation strategy."""
+"""Phase 1: Train a classifier on a pretrained backbone using a configurable adaptation strategy."""
 
 import argparse
 import json
@@ -15,7 +15,7 @@ import wandb
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from thunder.models.pretrained_models import get_model_from_name
+from trident.patch_encoder_models import encoder_factory
 
 from src.utils import set_seed, get_device, build_optimizer, grad_norm, save_results
 from src.models import ThunderBackboneAdapter, build_classifier, STRATEGIES
@@ -61,9 +61,9 @@ def run_train_epoch(model, loader, criterion, optimizer, scheduler, scaler, devi
 def main():
     parser = argparse.ArgumentParser(
         description="Phase 1: Train base classifier with configurable adaptation")
-    # --- Thunder model / dataset ---
+    # --- Model / dataset ---
     parser.add_argument("--model-name", type=str, required=True,
-                        help="Thunder model name (e.g. uni, hoptimus0, virchow, dinov2base)")
+                        help="TRIDENT model name (e.g. uni_v1, uni_v2, hoptimus0, virchow, dinov2base)")
     parser.add_argument("--dataset-name", type=str, required=True,
                         help="Thunder dataset name (e.g. crc, break_his, mhist)")
     parser.add_argument("--base-data-folder", type=str, required=True,
@@ -104,8 +104,10 @@ def main():
     set_seed(args.seed)
     device = get_device()
 
-    # --- Backbone ---
-    raw_backbone, transform, _ = get_model_from_name(args.model_name, str(device))
+    # --- Backbone (TRIDENT) ---
+    enc = encoder_factory(args.model_name)
+    raw_backbone = enc.model
+    transform = enc.eval_transforms
     adapter = ThunderBackboneAdapter(raw_backbone)
 
     # --- Data ---
