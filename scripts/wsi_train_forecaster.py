@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trident.patch_encoder_models import encoder_factory
 
-from src.utils import set_seed, get_device, save_results
+from src.utils import set_seed, get_device, save_results, EarlyStopping
 from src.models import AttentionForecaster
 from src.models.backbone_adapter import BackboneAdapter
 from src.data.wsi_tile_dataset import WSITileDataset
@@ -137,6 +137,8 @@ def main():
                         help="Gradient clipping norm (default: 1.0)")
     parser.add_argument("--num-workers", type=int, default=4,
                         help="DataLoader workers (default: 4)")
+    parser.add_argument("--patience", type=int, default=10,
+                        help="Early stopping patience (default: 10, 0 = disabled)")
     parser.add_argument("--seed", type=int, default=42)
     # Output
     parser.add_argument("--output-dir", type=str, required=True,
@@ -242,9 +244,14 @@ def main():
             tags=["phase1", "wsi", "forecaster"]
         )
 
+    # Register hooks once before training (not per-batch)
+    print("\nRegistering attention hooks...")
+    hooks, cache = register_hooks(backbone, adapter, args.prune_layer, target_layer, device)
+
     # Training loop
     best_val_loss = float("inf")
     best_val_rho = -1.0
+    early_stopper = EarlyStopping(patience=args.patience, min_delta=1e-5) if args.patience > 0 else None
 
     for epoch in range(args.epochs):
         # Train epoch
@@ -256,14 +263,9 @@ def main():
                          leave=False):
             tiles = tiles.to(device)
 
-            # Capture activations with hooks
-            hooks, cache = register_hooks(backbone, adapter, args.prune_layer, target_layer, device)
-
+            # Backbone forward with hooks already registered
             with torch.no_grad():
                 _ = backbone(tiles)
-
-            for h in hooks:
-                h.remove()
 
             src_emb = cache.get(f"emb_{args.prune_layer}")
             tgt_attn = cache.get(f"attn_{target_layer}")
@@ -293,6 +295,9 @@ def main():
             train_loss += loss.item() * len(tiles)
             train_count += len(tiles)
 
+            # Clear cache for next batch
+            cache.clear()
+
         train_loss /= train_count
 
         # Validation epoch
@@ -306,10 +311,7 @@ def main():
                              leave=False):
                 tiles = tiles.to(device)
 
-                hooks, cache = register_hooks(backbone, adapter, args.prune_layer, target_layer, device)
                 _ = backbone(tiles)
-                for h in hooks:
-                    h.remove()
 
                 src_emb = cache.get(f"emb_{args.prune_layer}")
                 tgt_attn = cache.get(f"attn_{target_layer}")
@@ -334,6 +336,9 @@ def main():
                 val_rhos.append(rho)
 
                 val_count += len(tiles)
+
+                # Clear cache for next batch
+                cache.clear()
 
         val_loss /= max(val_count, 1)
         val_rho = np.mean(val_rhos) if val_rhos else 0.0
@@ -361,6 +366,16 @@ def main():
             torch.save(forecaster.state_dict(), ckpt_path)
             print(f"  → Saved best checkpoint: {ckpt_path}")
 
+        # Early stopping
+        if early_stopper is not None:
+            if early_stopper.step(val_loss):
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
+
+    # Clean up hooks
+    for h in hooks:
+        h.remove()
+
     print(f"\n{'='*70}")
     print(f"Training complete!")
     print(f"  Best val_loss: {best_val_loss:.4f}")
@@ -381,7 +396,7 @@ def main():
         "train_wsis": len(train_paths),
         "val_wsis": len(val_paths),
     }
-    save_results(results, output_dir / "results.json")
+    save_results(output_dir / "results.json", results)
 
 
 if __name__ == "__main__":

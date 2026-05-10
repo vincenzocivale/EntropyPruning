@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trident.patch_encoder_models import encoder_factory
 
-from src.utils import set_seed, get_device, save_results
+from src.utils import set_seed, get_device, save_results, EarlyStopping
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning)
 from src.models.backbone_adapter import BackboneAdapter
 from src.data.wsi_tile_dataset import WSITileDataset
@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--patience", type=int, default=10,
+                        help="Early stopping patience (default: 10, 0 = disabled)")
     parser.add_argument("--seed", type=int, default=42)
     # Output
     parser.add_argument("--output-dir", type=str, required=True)
@@ -167,6 +169,7 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
+    early_stopper = EarlyStopping(patience=args.patience, min_delta=1e-5) if args.patience > 0 else None
 
     for epoch in range(args.epochs):
         # Train
@@ -179,19 +182,13 @@ def main():
             tiles = tiles.to(device)
 
             with torch.no_grad():
-                # Teacher CLS embedding (no pruning, no head)
-                teacher_x = tiles
-                for block in backbone_teacher.blocks:
-                    teacher_x = block(teacher_x)
-                teacher_x = backbone_teacher.norm(teacher_x)
-                teacher_cls = teacher_x[:, 0, :]  # (B, D) CLS token
+                # Teacher CLS embedding (no pruning)
+                # Use forward_features to get the full forward pass output
+                teacher_features = backbone_teacher.forward_features(tiles)
+                teacher_cls = teacher_features[:, 0, :]  # (B, D) CLS token
 
-            # Student forward (with pruning)
-            student_x = tiles
-            for block in student_model.backbone.model.blocks:
-                student_x = block(student_x)
-            student_x = student_model.backbone.model.norm(student_x)
-            student_cls = student_x[:, 0, :]  # (B, D) CLS token
+            # Student forward (with pruning via get_cls_embedding)
+            student_cls = student_model.get_cls_embedding(tiles)  # (B, D) CLS token
 
             # Cosine distance loss
             loss = cosine_distance(student_cls, teacher_cls)
@@ -216,18 +213,11 @@ def main():
                 tiles = tiles.to(device)
 
                 # Teacher
-                teacher_x = tiles
-                for block in backbone_teacher.blocks:
-                    teacher_x = block(teacher_x)
-                teacher_x = backbone_teacher.norm(teacher_x)
-                teacher_cls = teacher_x[:, 0, :]
+                teacher_features = backbone_teacher.forward_features(tiles)
+                teacher_cls = teacher_features[:, 0, :]
 
                 # Student
-                student_x = tiles
-                for block in student_model.backbone.model.blocks:
-                    student_x = block(student_x)
-                student_x = student_model.backbone.model.norm(student_x)
-                student_cls = student_x[:, 0, :]
+                student_cls = student_model.get_cls_embedding(tiles)
 
                 loss = cosine_distance(student_cls, teacher_cls)
                 val_loss += loss.item() * len(tiles)
@@ -254,6 +244,12 @@ def main():
             torch.save(student_model.state_dict(), ckpt_path)
             print(f"  → Saved: {ckpt_path}")
 
+        # Early stopping
+        if early_stopper is not None:
+            if early_stopper.step(val_loss):
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
+
     print(f"\n{'='*70}")
     print(f"Training complete!")
     print(f"  Best val_loss: {best_val_loss:.4f}")
@@ -268,7 +264,7 @@ def main():
         "keep_ratio": args.keep_ratio,
         "best_val_loss": best_val_loss,
     }
-    save_results(results, output_dir / "results_phase2.json")
+    save_results(output_dir / "results_phase2.json", results)
 
 
 if __name__ == "__main__":

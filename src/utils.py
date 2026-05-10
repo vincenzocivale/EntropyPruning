@@ -77,3 +77,46 @@ def save_results(path: Path, results: dict[str, Any]) -> Path:
     results = {**results, "saved_at": datetime.now().isoformat(timespec="seconds")}
     path.write_text(json.dumps(results, indent=2, default=str))
     return path
+
+
+class EarlyStopping:
+    """Stop training if validation metric does not improve for `patience` epochs.
+
+    Tracks the best metric value and increments a counter each epoch the metric
+    does not improve by at least `min_delta`. When counter reaches `patience`,
+    returns True, indicating training should stop.
+    """
+
+    def __init__(self, patience: int = 5, min_delta: float = 1e-4):
+        """
+        Args:
+            patience: Number of epochs with no improvement after which training will be stopped.
+            min_delta: Minimum change in the monitored metric to qualify as an improvement.
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_value = float("inf")
+        self.wait_count = 0
+
+    def step(self, current: float) -> bool:
+        """
+        Update early stopping state.
+
+        Args:
+            current: Current value of the metric (e.g., validation loss).
+
+        Returns:
+            True if training should stop, False otherwise.
+        """
+        if current < self.best_value - self.min_delta:
+            self.best_value = current
+            self.wait_count = 0
+            return False
+        else:
+            self.wait_count += 1
+            return self.wait_count >= self.patience
+
+    @property
+    def best(self) -> float:
+        """Best metric value seen so far."""
+        return self.best_value
