@@ -2,79 +2,130 @@
 
 ## Requirements
 
-- Python 3.10
-- CUDA-capable GPU (recommended: ≥ 24 GB VRAM for ViT-L/g backbones)
+- Python ≥ 3.10
+- CUDA-capable GPU (recommended: ≥ 24 GB VRAM for ViT-L/H/g backbones)
 - Git
 
-## Virtual environment
+## Environment setup
 
-The project uses a local `.venv` (not the conda `trident` environment, which is kept for reference via `environment.yml`).
-
-```bash
-# Create venv (first time only)
-python3.10 -m venv .venv
-
-# Activate
-source .venv/bin/activate
-
-# Install EAF dependencies
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install peft transformers timm wandb scikit-learn h5py fvcore tqdm
-```
-
-## Installing Thunder
-
-Thunder must be installed as an editable package from the sibling directory.
-Use `--no-deps` to avoid downgrading `timm` (the venv pins `timm==1.0.20`; Thunder's constraint `<=1.0.20` is satisfied).
+### 1. Create conda environment
 
 ```bash
-pip install -e ../thunder --no-deps
-
-# Install Thunder's runtime dependencies not already covered by EAF:
-pip install omegaconf hydra-core kornia wilds ijson sentencepiece
-pip install opencv-python plotly pydantic typer einops einops_exts
+cd /path/to/EntropyPruning
+conda env create -f environment_wsi.yml
+conda activate eaf-wsi
 ```
 
-Verify:
+The environment is pre-configured with:
+- PyTorch (2.1.x) with CUDA 12.1
+- TRIDENT (WSI loading, tile extraction, encoders)
+- Patho-Bench (benchmark datasets)
+- PyTorch Lightning, PEFT (LoRA), W&B
+- **timm==1.0.25** (pinned for encoder compatibility)
+
+### 2. Install TRIDENT and Patho-Bench
+
+**Important:** Use `--no-deps` to preserve the timm version.
 
 ```bash
-python -c "import thunder; from thunder.models.pretrained_models import get_model_from_name; print('Thunder OK')"
+# From the parent directory (assumes TRIDENT is a sibling repo)
+pip install -e /path/to/TRIDENT --no-deps
+
+# Install TRIDENT's runtime dependencies not already covered
+pip install omegaconf hydra-core kornia ijson sentencepiece
+pip install opencv-python plotly pydantic typer einops
+
+# Install Patho-Bench
+pip install -e /path/to/Patho-Bench
 ```
 
-## HuggingFace authentication
+Verify TRIDENT:
+```bash
+python -c "from trident.patch_encoder_models import encoder_factory; print('TRIDENT OK')"
+```
 
-Several foundation models require accepting usage terms on HuggingFace before downloading.
-Run `huggingface-cli login` and accept the model card for each model you plan to use:
+## HuggingFace Model Authentication
 
-- UNI: <https://huggingface.co/MahmoodLab/UNI>
-- UNI2-h: <https://huggingface.co/MahmoodLab/UNI2-h>
-- H-optimus-0: <https://huggingface.co/bioptimus/H-optimus-0>
-- Virchow: <https://huggingface.co/paige-ai/Virchow>
-
-## Thunder data setup
-
-Thunder datasets must be downloaded and split before use.
+Several foundation models require accepting terms on HuggingFace before downloading. For each model you plan to use, visit its card and accept the license:
 
 ```bash
-# Download a dataset (e.g. CRC)
-thunder download crc --base-data-folder /path/to/thunder/data
-
-# This creates:
-#   /path/to/thunder/data/datasets/crc/       — image files
-#   /path/to/thunder/data/data_splits/crc.json — train/val/test split
+huggingface-cli login
 ```
 
-The `--base-data-folder` path is passed to all EAF scripts via `--base-data-folder`.
+Required for:
+- [UNI v1](https://huggingface.co/MahmoodLab/UNI)
+- [Virchow](https://huggingface.co/paige-ai/Virchow)
+- [H-Optimus-0](https://huggingface.co/bioptimus/H-optimus-0)
+- [Hiboul](https://huggingface.co/jlevy44/hiboul)
+
+## WSI Data Setup
+
+WSI files (`.svs`, `.ndpi`, `.tiff`, `.tif`) must be organized in a directory. TRIDENT will automatically:
+1. Load slides via OpenSlide / ASAP
+2. Segment tissue using Otsu thresholding
+3. Extract tiles at specified magnification
+
+```bash
+# Example directory structure
+/path/to/wsis/
+├── slide_001.svs
+├── slide_002.svs
+├── ...
+```
+
+Pass `--wsi-dir /path/to/wsis` to all training and evaluation scripts.
+
+## Patho-Bench Datasets
+
+Benchmark datasets are accessed via Patho-Bench (which wraps TRIDENT).  
+Datasets are downloaded on-demand when first accessed. Ensure internet access and sufficient disk space.
+
+Supported datasets:
+- **TCGA-BRCA, TCGA-LUAD, TCGA-KIRC, TCGA-COAD**, etc. (specify `--dataset TCGA-{ORGAN}`, `--task {task_name}`)
+- **BACH** (breast histology)
+- **BreakHIS** (breast cancer)
+- **CAMELYON16/17** (lymph node metastasis)
+
+## Outputs and Checkpoints
+
+All scripts save results to `--output-dir` (default: `./results`). Structure:
+
+```
+results/
+├── forecaster_uni_v1_src4_tgt23.pt      (Phase 1 checkpoint)
+├── best_uni_v1_prune4_keep50.pt         (Phase 2 checkpoint)
+├── predictions.csv                      (Phase 3 predictions)
+├── results.json                         (metrics)
+```
+
+## Weights & Biases (Optional)
+
+To track experiments in W&B, set `--wandb-project {project_name}` and ensure you're logged in:
+
+```bash
+wandb login
+```
 
 ## Directory structure (after setup)
 
 ```
-EAF/
-├── EntropyPruning/          ← this repo (branch: thunder-integration)
-│   ├── .venv/
-│   ├── checkpoints/         ← created at runtime by training scripts
-│   ├── docs/
+EAF_WSI/
+├── EntropyPruning/                 (this repo)
+│   ├── environment_wsi.yml         (conda spec)
 │   ├── scripts/
-│   └── src/
-└── thunder/                 ← sibling repo, installed as editable package
+│   │   ├── wsi_train_forecaster.py (Phase 1)
+│   │   ├── wsi_distill_pruned.py   (Phase 2)
+│   │   ├── wsi_evaluate.py         (Phase 3)
+│   │   └── run_wsi_pipeline.py     (full pipeline)
+│   ├── src/
+│   │   ├── models/
+│   │   │   ├── forecaster.py
+│   │   │   ├── backbone_adapter.py
+│   │   │   ├── pruned_classifier.py
+│   │   └── data/
+│   │       └── wsi_tile_dataset.py
+│   ├── docs/
+│   └── results/                    (created at runtime)
+├── TRIDENT/                        (sibling repo, installed as editable)
+└── Patho-Bench/                    (sibling repo, installed as editable)
 ```

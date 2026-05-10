@@ -1,213 +1,554 @@
-# Training Pipeline
+# Training Pipeline — Step-by-Step Execution
 
-Complete walkthrough of the three-phase EAF training process.
+This guide walks through executing the complete EAF pipeline: Phase 1 (forecaster training) → Phase 2 (distillation) → Phase 3 (evaluation) on WSI datasets.
 
 ---
 
 ## Prerequisites
 
-```bash
-source .venv/bin/activate
-
-# Thunder data must be downloaded:
-thunder download crc --base-data-folder /path/to/thunder/data
-```
-
-Set a convenience variable:
-```bash
-DATA=/path/to/thunder/data
-MODEL=uni          # or hoptimus0, virchow, dinov2base, etc.
-DATASET=crc        # or break_his, mhist, patch_camelyon, etc.
-```
+1. **Environment:** `conda activate eaf-wsi`
+2. **WSI files:** Organized in a directory (e.g., `/data/wsis/TCGA-BRCA/`)
+3. **Encoder support:** Verify your chosen encoder is available via TRIDENT
+4. **GPU:** 24+ GB VRAM recommended for ViT-L/H/g backbones
 
 ---
 
-## Phase 1 — Base Classifier
+## Full Pipeline (One Command)
 
-Fine-tune a classification head on top of the backbone using the chosen adaptation strategy.
+For convenience, run all three phases in sequence:
 
 ```bash
-python scripts/train_classifier.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --adaptation lora \
-    --lora-r 8 \
-    --lora-alpha 32 \
-    --epochs 20 \
-    --batch-size 8 \
-    --lr-backbone 1e-5 \
-    --lr-head 1e-3 \
-    --weight-decay 0.01 \
-    --warmup-steps 100 \
-    --label-smoothing 0.1 \
-    --early-stopping-patience 3
+python scripts/run_wsi_pipeline.py \
+    --encoder uni_v1 \
+    --dataset TCGA-BRCA \
+    --task subtype \
+    --wsi-dir /data/wsis/TCGA-BRCA \
+    --output-dir ./results \
+    --prune-layer 4 \
+    --keep-ratio 0.5 \
+    --epochs-phase1 30 \
+    --epochs-phase2 20 \
+    --batch-size 32 \
+    --wandb-project my-eaf-experiments
 ```
 
-**Early stopping:** Ferma il training se la metrica scelta non migliora per N epoche consecutive (default: 3).
-Imposta `--early-stopping-patience 0` per disabilitarlo.
+This script:
+1. Trains forecaster on WSIs
+2. Distills pruned model on WSIs
+3. Evaluates on Patho-Bench test set
 
-**Output:** `checkpoints/$DATASET/${MODEL}_lora/best_model.pt`
-
-The script prints a classification report on the test split at the end.
-
-### Choosing `--prune-layer` early
-
-The source layer used for feature extraction in Phase 2 should be decided now.
-For a ViT-L (24 blocks), layer 2 is a good starting point.
-For H-optimus (40 blocks), layer 5–8. Run `scripts/ablations/layer_ablation.py` later to find the optimal layer.
+For more granular control, follow the steps below.
 
 ---
 
-## Phase 2 — AttentionForecaster
+## Phase 1 — AttentionForecaster Training
 
-### Step 2a — Feature extraction
+### Goal
+Train a lightweight attention predictor to rank patches by importance, using only WSI tiles (no labels needed).
 
-The first time you run Phase 2, `collect_and_save_dataset` is called automatically.
-It runs the Phase 1 model in eval mode and caches, for each image:
-- Patch embeddings at the source layer(s): shape `(P, D)`, float16
-- CLS attention weights at the target layer: shape `(P,)`, float16
+### Command
 
 ```bash
-python scripts/train_forecaster.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --adaptation lora \            # must match Phase 1
-    --layers-source 2 \            # which layers to extract embeddings from
-    --layer-target 23 \            # which layer to predict attention for (default: last)
+python scripts/wsi_train_forecaster.py \
+    --encoder uni_v1 \
+    --wsi-dir /data/wsis/training_slides \
+    --prune-layer 4 \
+    --target-layer 23 \
+    --mag 20 \
+    --patch-size 256 \
+    --tiles-per-wsi 64 \
+    --val-split 0.1 \
     --epochs 30 \
-    --hidden 256 \
-    --n-heads 4 \
-    --n-layers 2 \
+    --batch-size 32 \
     --lr 1e-4 \
-    --wandb-project eaf-forecaster
+    --output-dir ./results/phase1 \
+    --wandb-project my-eaf-experiments
 ```
 
-**Feature cache:** `checkpoints/$DATASET/${DATASET}_${MODEL}_features.h5`
-**Output:** `checkpoints/$DATASET/${MODEL}_forecaster/forecaster_src02_tgt23.pt`
+### Key arguments
 
-If the cache already exists (from a previous run), feature extraction is skipped.
+| Argument | Description | Default |
+|---|---|---|
+| `--encoder` | TRIDENT encoder name (uni_v1, virchow, hoptimus0, ...) | required |
+| `--wsi-dir` | Directory with `.svs`, `.ndpi`, `.tif` files | required |
+| `--prune-layer` | Source layer for embeddings (typically 4–8 for ViT-L) | required |
+| `--target-layer` | Target layer for attention supervision | n_blocks - 1 |
+| `--mag` | Tile magnification | 20 |
+| `--patch-size` | Tile size in pixels | 256 |
+| `--tiles-per-wsi` | Sampled tiles per WSI per epoch | 64 |
+| `--val-split` | Fraction of WSIs for validation | 0.1 |
+| `--epochs` | Training epochs | 30 |
+| `--batch-size` | Batch size | 32 |
+| `--lr` | Learning rate | 1e-4 |
+| `--weight-decay` | Weight decay | 0.0 |
+| `--grad-clip` | Gradient clipping norm | 1.0 |
+| `--hidden` | Forecaster hidden dimension | 256 |
+| `--n-heads` | Forecaster attention heads | 4 |
+| `--n-layers` | Forecaster transformer layers | 2 |
+| `--dropout` | Forecaster dropout | 0.2 |
+| `--wandb-project` | W&B project (optional) | None |
+| `--output-dir` | Where to save checkpoint | required |
 
-### Step 2b — Multiple source layers
+### Monitoring
 
-You can extract from multiple layers and train one forecaster per layer in a single run:
+- **Validation metrics:**
+  - `val_loss` — KL divergence (should decrease)
+  - `val_rho` — Spearman rank correlation (should increase, target > 0.6)
+- **Early stopping:** Best checkpoint saved when `val_loss` improves
+- **Output:**
+  - `forecaster_uni_v1_src4_tgt23.pt` — best model weights
+  - `results.json` — training metrics
 
-```bash
-python scripts/train_forecaster.py \
-    ... \
-    --layers-source 2 4 8 12
+### Example output
+```
+Epoch  1 | train_loss=0.5123 | val_loss=0.4891  val_rho=0.6234
+Epoch  2 | train_loss=0.4756 | val_loss=0.4523  val_rho=0.6512
+...
+Epoch 30 | train_loss=0.2134 | val_loss=0.2098  val_rho=0.8234
+  → Saved best checkpoint: ./results/phase1/forecaster_uni_v1_src4_tgt23.pt
+
+=======================================================================
+Training complete!
+  Best val_loss: 0.2098
+  Best val_rho: 0.8234
+=======================================================================
 ```
 
-This trains four forecasters: `forecaster_src02_tgt23.pt`, `forecaster_src04_tgt23.pt`, etc.
-Use `scripts/ablations/layer_ablation.py` to compare them systematically.
+### Troubleshooting
 
-### Monitoring forecaster quality
+**"No WSI files found"**
+- Check: files are `.svs`, `.ndpi`, `.tif`, or `.tiff`
+- Check: `--wsi-dir` is correct and readable
 
-Watch `val/rho` in W&B (Spearman rank correlation against ground-truth attention).
-A good forecaster typically reaches `rho > 0.5` on the validation set.
-`test/delta_vs_norm` shows the improvement over a simple token-norm baseline.
+**High loss, poor Spearman correlation**
+- Try: different source layer (earlier in network may be too noisy)
+- Try: longer training (`--epochs 50`)
+- Try: larger forecaster (`--hidden 512`, `--n-layers 4`)
+
+**GPU out of memory**
+- Reduce `--batch-size` (e.g., 16 or 8)
+- Reduce `--tiles-per-wsi` (e.g., 32)
+- Use smaller encoder (if possible)
 
 ---
 
-## Phase 3 — Pruned Fine-tuning
+## Phase 2 — Pruned Model Distillation
 
-Load Phase 1 weights into `GenericLoRAWithForecasterPruning`, freeze the forecaster, and fine-tune.
+### Goal
+Fine-tune the pruned backbone (with LoRA adapters) to match the non-pruned teacher's CLS embeddings while maintaining forecaster-based pruning.
+
+### Prerequisites
+- Phase 1 checkpoint: `forecaster_uni_v1_src4_tgt23.pt`
+- **Important:** Prune layer must match Phase 1
+
+### Command
 
 ```bash
-python scripts/finetune_pruned.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --prune-layer 2 \
-    --keep-ratio 0.1 \            # keep 10% of patches
+python scripts/wsi_distill_pruned.py \
+    --encoder uni_v1 \
+    --wsi-dir /data/wsis/training_slides \
+    --forecaster-ckpt ./results/phase1/forecaster_uni_v1_src4_tgt23.pt \
+    --prune-layer 4 \
+    --keep-ratio 0.5 \
+    --mag 20 \
+    --patch-size 256 \
+    --tiles-per-wsi 64 \
+    --val-split 0.1 \
     --epochs 20 \
-    --batch-size 16 \
-    --lr-backbone 1e-4 \
-    --lr-head 1e-3 \
-    --wandb-project eaf-pruning \
-    --eval-baseline \             # also evaluate unpruned model for comparison
-    --early-stopping-patience 3
+    --batch-size 32 \
+    --lr 1e-4 \
+    --weight-decay 0.01 \
+    --grad-clip 1.0 \
+    --output-dir ./results/phase2 \
+    --wandb-project my-eaf-experiments
 ```
 
-**Early stopping:** Ferma il training se la metrica non migliora per N epoche consecutive (default: 3).
+### Key arguments
 
-**Output:** `checkpoints/$DATASET/${MODEL}_pruned/best_${MODEL}_prune2_keep10.pt`
+| Argument | Description | Default |
+|---|---|---|
+| `--forecaster-ckpt` | Path to Phase 1 forecaster checkpoint | required |
+| `--prune-layer` | **Must match Phase 1** | required |
+| `--keep-ratio` | Fraction of tokens to keep (0.0–1.0, e.g., 0.5 = 50% kept) | required |
+| `--epochs` | Training epochs (typically shorter than Phase 1) | 20 |
+| `--weight-decay` | LoRA regularization | 0.01 |
+| `--lr` | Learning rate for LoRA | 1e-4 |
 
-### `--keep-ratio` sweep
+### Monitoring
+
+- **Validation metric:** `val_loss` (cosine distance between student and teacher CLS embeddings)
+- **Expected behavior:** Loss should decrease monotonically
+- **Output:**
+  - `best_uni_v1_prune4_keep50.pt` — pruned model with LoRA weights
+  - `results_phase2.json` — distillation metrics
+
+### Example output
+```
+Epoch  1 | train_loss=0.3456 | val_loss=0.3123
+Epoch  2 | train_loss=0.3012 | val_loss=0.2876
+...
+Epoch 20 | train_loss=0.1234 | val_loss=0.1198
+  → Saved: ./results/phase2/best_uni_v1_prune4_keep50.pt
+
+=======================================================================
+Training complete!
+  Best val_loss: 0.1198
+=======================================================================
+```
+
+### Troubleshooting
+
+**Loss doesn't decrease or plateaus early**
+- Try: lower `--keep-ratio` (less aggressive pruning; e.g., 0.7 instead of 0.5)
+- Try: higher `--lr` (e.g., 5e-4 instead of 1e-4)
+- Try: longer training (`--epochs 40`)
+
+**Training diverges (loss explodes)**
+- Reduce `--lr` (e.g., 5e-5)
+- Increase `--grad-clip` (e.g., 10.0)
+- Reduce `--batch-size`
+
+**GPU out of memory**
+- Reduce `--batch-size` or `--tiles-per-wsi`
+- If still too large, try a smaller encoder
+
+---
+
+## Phase 3 — WSI-Level Evaluation
+
+### Goal
+Evaluate on full Patho-Bench WSI slides: extract tile embeddings, aggregate to slide level, train a linear classifier, and report accuracy/F1/AUC.
+
+### Prerequisites
+- Phase 2 checkpoint: `best_uni_v1_prune4_keep50.pt`
+- Patho-Bench dataset (auto-downloaded on first access via TRIDENT)
+
+### Command
 
 ```bash
-for RATIO in 0.05 0.1 0.2 0.3 0.5; do
-    python scripts/finetune_pruned.py \
-        --model-name $MODEL --dataset-name $DATASET \
-        --base-data-folder $DATA \
-        --prune-layer 2 --keep-ratio $RATIO \
-        --epochs 20
+python scripts/wsi_evaluate.py \
+    --encoder uni_v1 \
+    --dataset TCGA-BRCA \
+    --task subtype \
+    --checkpoint ./results/phase2/best_uni_v1_prune4_keep50.pt \
+    --mag 20 \
+    --patch-size 256 \
+    --batch-size 32 \
+    --output-dir ./results/phase3
+```
+
+### Key arguments
+
+| Argument | Description | Default |
+|---|---|---|
+| `--dataset` | Patho-Bench dataset (TCGA-BRCA, TCGA-LUAD, BACH, ...) | required |
+| `--task` | Classification task for dataset (e.g., subtype, mutational_status) | required |
+| `--checkpoint` | Phase 2 pruned model checkpoint | required |
+| `--compare-full` | Also evaluate unpruned encoder for comparison (slower) | False |
+
+### Monitoring
+
+- **Progress:** Slides are processed in batches; progress bar shown
+- **Output:** Per-slide predictions and aggregated metrics
+
+### Example output
+```
+Loading checkpoint: ./results/phase2/best_uni_v1_prune4_keep50.pt
+Processing TCGA-BRCA slides...
+  Slide 001: pred=LumA, conf=0.92
+  Slide 002: pred=LumB, conf=0.87
+  ...
+
+=== Metrics (Pruned, keep_ratio=0.5) ===
+  Accuracy: 0.8234
+  F1 (macro): 0.7956
+  AUC: 0.8876
+  Speedup: 1.34x (inference 25% faster)
+
+Results saved to:
+  - predictions.csv
+  - metrics.json
+```
+
+---
+
+## Ablation Studies
+
+### Layer Sweep
+Test different source layers (prune points):
+
+```bash
+for layer in 2 4 6 8 10; do
+  echo "=== Layer $layer ==="
+  
+  # Phase 1
+  python scripts/wsi_train_forecaster.py \
+      --encoder uni_v1 \
+      --wsi-dir /data/wsis/training \
+      --prune-layer $layer \
+      --target-layer 23 \
+      --epochs 30 \
+      --output-dir ./ablation/layer_$layer/phase1
+  
+  # Phase 2
+  python scripts/wsi_distill_pruned.py \
+      --encoder uni_v1 \
+      --wsi-dir /data/wsis/training \
+      --forecaster-ckpt ./ablation/layer_$layer/phase1/forecaster_*.pt \
+      --prune-layer $layer \
+      --keep-ratio 0.5 \
+      --epochs 20 \
+      --output-dir ./ablation/layer_$layer/phase2
+  
+  # Phase 3
+  python scripts/wsi_evaluate.py \
+      --encoder uni_v1 \
+      --dataset TCGA-BRCA \
+      --task subtype \
+      --checkpoint ./ablation/layer_$layer/phase2/best_*.pt \
+      --output-dir ./ablation/layer_$layer/phase3
+done
+```
+
+### Keep-ratio Sweep
+Test different compression levels:
+
+```bash
+for ratio in 0.3 0.5 0.7 0.9; do
+  echo "=== Keep ratio $ratio ==="
+  
+  python scripts/wsi_distill_pruned.py \
+      --encoder uni_v1 \
+      --wsi-dir /data/wsis/training \
+      --forecaster-ckpt ./results/phase1/forecaster_*.pt \
+      --prune-layer 4 \
+      --keep-ratio $ratio \
+      --epochs 20 \
+      --output-dir ./ablation/keep_${ratio}/phase2
+  
+  python scripts/wsi_evaluate.py \
+      --encoder uni_v1 \
+      --dataset TCGA-BRCA \
+      --task subtype \
+      --checkpoint ./ablation/keep_${ratio}/phase2/best_*.pt \
+      --output-dir ./ablation/keep_${ratio}/phase3
+done
+```
+
+Collect results:
+```python
+import json
+import pandas as pd
+
+results = []
+for ratio in [0.3, 0.5, 0.7, 0.9]:
+    with open(f"./ablation/keep_{ratio}/phase3/metrics.json") as f:
+        m = json.load(f)
+    results.append({
+        "keep_ratio": ratio,
+        "accuracy": m["accuracy"],
+        "f1": m["f1_macro"],
+        "auc": m["auc"],
+        "speedup": m.get("speedup", 1.0),
+    })
+
+df = pd.DataFrame(results)
+print(df)
+```
+
+---
+
+## Common Workflows
+
+### Quick Testing
+Minimal setup for rapid iteration:
+
+```bash
+python scripts/run_wsi_pipeline.py \
+    --encoder uni_v1 \
+    --dataset TCGA-BRCA \
+    --task subtype \
+    --wsi-dir /data/wsis/TCGA-BRCA \
+    --output-dir ./results \
+    --prune-layer 4 \
+    --keep-ratio 0.5 \
+    --tiles-per-wsi 16 \
+    --epochs-phase1 3 \
+    --epochs-phase2 2
+```
+
+Completes in ~5 minutes, gives quick feedback on setup and hyperparameters.
+
+### Multi-encoder Comparison
+Train and evaluate across multiple encoders:
+
+```bash
+for encoder in uni_v1 virchow hoptimus0; do
+  echo "=== Encoder: $encoder ==="
+  
+  python scripts/run_wsi_pipeline.py \
+      --encoder $encoder \
+      --dataset TCGA-BRCA \
+      --task subtype \
+      --wsi-dir /data/wsis/TCGA-BRCA \
+      --output-dir ./results/$encoder \
+      --prune-layer 4 \
+      --keep-ratio 0.5 \
+      --wandb-project eaf-encoders
+done
+```
+
+### Multi-dataset Evaluation
+Test on multiple Patho-Bench datasets:
+
+```bash
+for dataset in TCGA-BRCA TCGA-LUAD BACH BreakHIS; do
+  # Extract dataset and task
+  IFS='-' read -ra parts <<< "$dataset"
+  if [[ "$dataset" == "TCGA-"* ]]; then
+    ds=${dataset}
+    task="subtype"
+  else
+    ds=$dataset
+    task="tumor_grade"  # dataset-specific
+  fi
+  
+  echo "=== $dataset ($task) ==="
+  
+  python scripts/wsi_evaluate.py \
+      --encoder uni_v1 \
+      --dataset $ds \
+      --task $task \
+      --checkpoint ./results/best_*.pt \
+      --output-dir ./results/eval_$dataset
 done
 ```
 
 ---
 
-## Evaluation
+## Output Structure
 
-Reload any pruned checkpoint and evaluate on the test set:
+After running the full pipeline, your `results/` directory will contain:
+
+```
+results/
+├── phase1/
+│   ├── forecaster_uni_v1_src4_tgt23.pt    ← Best Phase 1 checkpoint
+│   └── results.json                       ← Phase 1 metrics
+├── phase2/
+│   ├── best_uni_v1_prune4_keep50.pt       ← Best Phase 2 checkpoint
+│   └── results_phase2.json                ← Phase 2 distillation loss
+├── phase3/
+│   ├── predictions.csv                    ← Per-slide predictions
+│   ├── metrics.json                       ← Accuracy, F1, AUC, etc.
+│   └── plots/
+│       ├── confusion_matrix.png
+│       ├── roc_curve.png
+│       └── auc_by_subtype.png
+└── logs/
+    └── wandb_runs/                        ← If --wandb-project enabled
+```
+
+### Loading and analyzing results
+
+```python
+import json
+import pandas as pd
+
+# Phase 1 metrics
+with open("results/phase1/results.json") as f:
+    p1 = json.load(f)
+print(f"Phase 1 best correlation: {p1['best_val_rho']:.4f}")
+
+# Phase 3 predictions
+preds = pd.read_csv("results/phase3/predictions.csv")
+print(f"Processed {len(preds)} slides")
+print(preds.head())
+
+# Phase 3 metrics
+with open("results/phase3/metrics.json") as f:
+    metrics = json.load(f)
+print(f"Accuracy: {metrics['accuracy']:.4f}")
+print(f"F1 (macro): {metrics['f1_macro']:.4f}")
+print(f"AUC: {metrics['auc']:.4f}")
+
+# If speedup computed
+if "speedup" in metrics:
+    print(f"Inference speedup: {metrics['speedup']:.2f}x")
+    print(f"Token reduction: {(1 - keep_ratio) * 100:.1f}%")
+```
+
+---
+
+## Tips & Tricks
+
+### Checkpointing intermediate results
+If running the full pipeline, intermediate Phase 1 and Phase 2 checkpoints are saved in `--output-dir`. You can resume or skip phases:
 
 ```bash
-python scripts/evaluate_pruned_checkpoints.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --prune-layers 2 \
-    --keep-ratios 0.05 0.1 0.2 0.3 0.5 \
-    --output-csv results/eval_${MODEL}_${DATASET}.csv
+# Skip Phase 1 (use pre-trained forecaster)
+python scripts/run_wsi_pipeline.py \
+    ... \
+    --forecaster-ckpt ./results/phase1/forecaster_*.pt \
+    --skip-phase1
 ```
 
-The CSV contains accuracy, F1-macro, TAR@FAR, ms/img, and GFLOPs for each configuration.
-
----
-
-## Layer ablation
-
-To find the best `(prune_layer, target_layer)` pair:
+### W&B integration
+If running with `--wandb-project my-project`, all metrics are logged to Weights & Biases.  
+Useful for comparing multiple runs:
 
 ```bash
-python scripts/ablations/layer_ablation.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --layers-source 2 4 8 12 \
-    --layers-target 23 22 20 \
-    --keep-ratio 0.1 \
-    --epochs 10 \
-    --wandb-project eaf-ablation
+# Run 1
+python scripts/wsi_train_forecaster.py \
+    ... \
+    --wandb-project my-eaf \
+    --output-dir ./results/run1
+
+# Run 2 (different hyperparameters)
+python scripts/wsi_train_forecaster.py \
+    ... \
+    --lr 5e-4 \
+    --hidden 512 \
+    --wandb-project my-eaf \
+    --output-dir ./results/run2
+
+# View comparison at wandb.ai/my-username/my-eaf
 ```
 
-Results are appended to `checkpoints/$DATASET/ablations/ablation_${MODEL}_src*_tgt*.csv`.
+### Resuming interrupted training
+If a run is interrupted (GPU crash, etc.), restart from the same checkpoint:
+
+```bash
+# Phase 2 will continue from last epoch if checkpoint exists
+python scripts/wsi_distill_pruned.py \
+    ... \
+    --output-dir ./results/phase2  ← same as before
+    --epochs 40                     ← can extend
+```
 
 ---
 
-## Checkpoint naming conventions
+## Debugging Common Issues
 
-```
-checkpoints/
-└── {dataset}/
-    ├── {model}_{adaptation}/
-    │   └── best_model.pt                           ← Phase 1
-    ├── {model}_forecaster/
-    │   └── forecaster_src{L:02d}_tgt{T:02d}.pt    ← Phase 2
-    ├── {dataset}_{model}_features.h5               ← Phase 2 cache
-    └── {model}_pruned/
-        └── best_{model}_prune{L}_keep{k}.pt        ← Phase 3
-```
+### Phase 1: "Hook didn't capture data"
+- Check: `--prune-layer` and `--target-layer` are valid (< n_blocks)
+- Check: tiles are being loaded (check dataset build logs)
 
----
+### Phase 2: Student model architecture mismatch
+- Check: `--prune-layer` matches Phase 1
+- Check: encoder name matches Phase 1
 
-## Tips
+### Phase 3: Very low accuracy
+- Try: less aggressive pruning (`--keep-ratio 0.7` or `0.9`)
+- Try: different prune layer (earlier layers may be too coarse)
+- Check: dataset/task combination is valid for encoder
 
-**Out of memory in Phase 1** — reduce `--batch-size` or switch to `--adaptation linear_probing` (no backbone gradients).
+### All phases: GPU memory issues
+- Reduce batch size: `--batch-size 8` or `16`
+- Reduce tiles per WSI: `--tiles-per-wsi 32`
+- Use a smaller encoder if available
 
-**Phase 2 cache is stale** — delete the `.h5` file; it will be regenerated on the next run.
-
-**Phase 3 not improving over baseline** — try a lower `--keep-ratio` (less aggressive pruning), a different `--prune-layer`, or more `--epochs`.
-
-**Forecaster `val/rho` stays near 0** — the source layer may be too early (features not yet discriminative). Try a later source layer.
+### All phases: Slow training
+- Increase workers: `--num-workers 8` (if available)
+- Reduce verbosity: remove `--verbose` flag
+- Check GPU utilization with `nvidia-smi`
