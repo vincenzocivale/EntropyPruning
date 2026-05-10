@@ -151,6 +151,7 @@ def main():
 
         for imgs, labels in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1}"):
             imgs, labels = imgs.to(device), labels.to(device)
+
             with autocast("cuda"):
                 logits = model(imgs)
                 loss = criterion(logits, labels)

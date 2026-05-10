@@ -52,14 +52,9 @@ def build_thunder_loaders(
     Notes:
         - Requires {base_data_folder}/data_splits/{dataset_name}.json.
           Generate with: thunder download {dataset_name}
-        - bracs requires div_patches=True (variable patch count) — not supported.
         - Training loader uses WeightedRandomSampler for class balance.
     """
-    if dataset_name == "bracs":
-        raise ValueError(
-            "bracs requires div_patches=True (variable patch count) and is not "
-            "supported by build_thunder_loaders."
-        )
+    use_div_patches = False
 
     split_path = Path(base_data_folder) / "data_splits" / f"{dataset_name}.json"
     if not split_path.exists():
@@ -96,6 +91,7 @@ def build_thunder_loaders(
             embeddings_folder=None,
             image_pre_loading=False,
             embedding_pre_loading=False,
+            div_patches=use_div_patches,
             h5_format=h5_format,
         ))
 

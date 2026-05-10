@@ -16,12 +16,12 @@ CKPT_BASE=/raid/DATASETS/EAF_results/checkpoints
 LOG_DIR=/raid/DATASETS/EAF_results/logs/lora_experiments
 
 export THUNDER_BASE_DATA_FOLDER=/raid/DATASETS/EAF_results
-MODEL=uni
-DATASETS=(patch_camelyon)
-KEEP_RATIOS=(0.1 0.2 0.3)
+MODEL=genbio-pathfm
+DATASETS=(bracs)
+KEEP_RATIOS=(0.3 0.1 0.2)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
-BATCH_SIZE=${BATCH_SIZE:-32}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
+BATCH_SIZE=${BATCH_SIZE:-16}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
 EARLY_STOPPING_PATIENCE=3
 
 mkdir -p "$LOG_DIR"
@@ -136,7 +136,7 @@ phase3() {
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-log "=== Starting LoRA experiments: UNI on mhist, wilds, spider_colorectal ==="
+log "=== Starting LoRA experiments: GENBIO-PATHFM on wilds ==="
 log "Pruning rates: 10%, 20%, 30% (keep-ratios: 0.1, 0.2, 0.3)"
 
 # Step 0: download missing datasets
