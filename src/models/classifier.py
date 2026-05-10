@@ -116,6 +116,9 @@ class LinearProbingClassifier(BaseClassifier):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             emb = self.backbone(x)
+        # Extract CLS token (first token after pooling)
+        if emb.ndim == 3:
+            emb = emb[:, 0]
         return self.head(emb)
 
 
@@ -170,7 +173,11 @@ class LoRAClassifier(BaseClassifier):
         return [p for p in self.backbone.parameters() if p.requires_grad]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.backbone(x))
+        emb = self.backbone(x)
+        # Extract CLS token (first token after pooling)
+        if emb.ndim == 3:
+            emb = emb[:, 0]
+        return self.head(emb)
 
 
 class FullFinetuneClassifier(BaseClassifier):
@@ -208,7 +215,11 @@ class FullFinetuneClassifier(BaseClassifier):
         return list(self.backbone.parameters())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.backbone(x))
+        emb = self.backbone(x)
+        # Extract CLS token (first token after pooling)
+        if emb.ndim == 3:
+            emb = emb[:, 0]
+        return self.head(emb)
 
 
 class BitFitClassifier(BaseClassifier):
@@ -251,7 +262,11 @@ class BitFitClassifier(BaseClassifier):
         return [p for p in self.backbone.parameters() if p.requires_grad]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.backbone(x))
+        emb = self.backbone(x)
+        # Extract CLS token (first token after pooling)
+        if emb.ndim == 3:
+            emb = emb[:, 0]
+        return self.head(emb)
 
 
 # ---------------------------------------------------------------------------

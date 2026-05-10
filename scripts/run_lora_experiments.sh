@@ -16,12 +16,12 @@ CKPT_BASE=/raid/DATASETS/EAF_results/checkpoints
 LOG_DIR=/raid/DATASETS/EAF_results/logs/lora_experiments
 
 export THUNDER_BASE_DATA_FOLDER=/raid/DATASETS/EAF_results
-MODEL=genbio-pathfm
-DATASETS=(bracs)
+MODEL=virchow2
+DATASETS=(patch_camelyon)
 KEEP_RATIOS=(0.3 0.1 0.2)
 PRUNE_LAYER=2
 PRUNE_LAYER_FMT=$(printf "%02d" $PRUNE_LAYER)
-BATCH_SIZE=${BATCH_SIZE:-16}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
+BATCH_SIZE=${BATCH_SIZE:-"32"}  # default 8; override with: BATCH_SIZE=16 bash run_lora_experiments.sh
 EARLY_STOPPING_PATIENCE=3
 
 mkdir -p "$LOG_DIR"
@@ -41,7 +41,7 @@ download_dataset() {
         return 0
     fi
     log "[RUN] Downloading $ds ..."
-    THUNDER_BASE_DATA_FOLDER=/data/EAF_data/thunder \
+    THUNDER_BASE_DATA_FOLDER=$THUNDER_BASE_DATA_FOLDER \
         "$THUNDER_CLI" download-datasets "$ds" --make-splits \
         2>&1 | tee "$LOG_DIR/download_${ds}.log"
     log "[DONE] Download $ds"

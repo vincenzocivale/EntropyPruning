@@ -24,7 +24,7 @@ class _TupleDataset(Dataset):
     def __getitem__(self, idx):
         item = self._ds[idx]
         label = np.asarray(item["label"]).reshape(()).item()
-        return item["image"], torch.tensor(label, dtype=torch.long)
+        return item["image"], int(label)
 
 
 def build_thunder_loaders(
