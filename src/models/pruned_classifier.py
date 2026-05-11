@@ -136,8 +136,10 @@ class GenericLoRAWithForecasterPruning(nn.Module):
         Returns:
             logits: (B, n_classes)
         """
-        # Backbone forward (with pruning applied by hook at prune_layer)
-        features = self.backbone(x)  # (B, N_kept, D)
+        # Backbone forward (with pruning applied by hook at prune_layer).
+        # Use forward_features to get the full token sequence; the top-level
+        # forward() would apply pooling/head and return (B, D) instead.
+        features = self.raw_backbone.forward_features(x)  # (B, N_kept, D)
 
         # Extract CLS token and pass through classification head
         cls_token = features[:, 0, :]  # (B, D)
@@ -157,6 +159,6 @@ class GenericLoRAWithForecasterPruning(nn.Module):
         Returns:
             cls_embedding: (B, D)
         """
-        features = self.backbone(x)  # (B, N_kept, D)
+        features = self.raw_backbone.forward_features(x)  # (B, N_kept, D)
         cls_embedding = features[:, 0, :]  # (B, D)
         return cls_embedding

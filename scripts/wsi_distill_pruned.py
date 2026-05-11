@@ -21,15 +21,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trident.patch_encoder_models import encoder_factory
 
-from src.utils import set_seed, get_device, save_results, EarlyStopping
+from src.utils import set_seed, get_device, save_results, EarlyStopping, PlateauStopper
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning)
 from src.models.backbone_adapter import BackboneAdapter
-from src.data.wsi_tile_dataset import WSITileDataset
+from src.data.wsi_tile_dataset import WSITileDataset, load_mpp_map
 
 
 def cosine_distance(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
     """Cosine distance loss (1 - cosine_similarity)."""
     return 1.0 - F.cosine_similarity(x1, x2, dim=-1).mean()
+
+
+def run_validation(student_model, backbone_teacher, val_loader, device,
+                   max_batches: int | None = None):
+    """Run distillation validation. Returns (val_loss, val_cos_sim, val_count)."""
+    student_model.eval()
+    backbone_teacher.eval()
+    val_loss = 0.0
+    val_count = 0
+    with torch.no_grad():
+        for i, tiles in enumerate(val_loader):
+            if max_batches is not None and i >= max_batches:
+                break
+            tiles = tiles.to(device)
+            teacher_features = backbone_teacher.forward_features(tiles)
+            teacher_cls = teacher_features[:, 0, :]
+            student_cls = student_model.get_cls_embedding(tiles)
+            loss = cosine_distance(student_cls, teacher_cls)
+            val_loss += loss.item() * len(tiles)
+            val_count += len(tiles)
+    val_loss = val_loss / max(val_count, 1)
+    val_cos = 1.0 - val_loss
+    return val_loss, val_cos, val_count
 
 
 def main():
@@ -41,6 +64,9 @@ def main():
                         help="TRIDENT encoder name (e.g. uni_v1, virchow)")
     parser.add_argument("--wsi-dir", type=str, required=True,
                         help="Directory containing WSI files for training")
+    parser.add_argument("--wsi-list-csv", type=str, default=None,
+                        help="Optional CSV with `wsi` and `mpp` columns. Defaults to "
+                             "<wsi-dir>/wsi_list.csv if present.")
     parser.add_argument("--forecaster-ckpt", type=str, required=True,
                         help="Path to Phase 1 forecaster checkpoint")
     parser.add_argument("--prune-layer", type=int, required=True,
@@ -58,9 +84,23 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--num-prep-workers", type=int, default=8,
+                        help="Subprocesses for parallel WSI segmentation/indexing (default: 8)")
     parser.add_argument("--patience", type=int, default=10,
-                        help="Early stopping patience (default: 10, 0 = disabled)")
+                        help="Epoch-level early stopping patience (default: 10, 0 = disabled)")
+    # Intra-epoch plateau detection (on validation cosine similarity)
+    parser.add_argument("--val-every-steps", type=int, default=0,
+                        help="Run a fast validation every N training steps for plateau check "
+                             "(default: 0 = disabled, only epoch-level check runs)")
+    parser.add_argument("--val-batches", type=int, default=8,
+                        help="Batches used per fast validation pass (default: 8)")
+    parser.add_argument("--plateau-patience", type=int, default=5,
+                        help="Consecutive fast-val checks without cos EMA improvement before stop (default: 5)")
+    parser.add_argument("--plateau-min-delta", type=float, default=1e-3,
+                        help="Minimum cos EMA improvement to reset plateau counter (default: 1e-3)")
+    parser.add_argument("--ema-alpha", type=float, default=0.3,
+                        help="EMA smoothing factor for cos plateau detection (default: 0.3)")
     parser.add_argument("--seed", type=int, default=42)
     # Output
     parser.add_argument("--output-dir", type=str, required=True)
@@ -136,15 +176,22 @@ def main():
     print(f"Found {len(wsi_paths)} WSI files")
     print(f"  Train: {len(train_paths)}  Val: {len(val_paths)}\n")
 
+    # MPP override map
+    mpp_csv = args.wsi_list_csv or str(wsi_dir / "wsi_list.csv")
+    mpp_map = load_mpp_map(mpp_csv)
+    print(f"MPP map: {len(mpp_map)} entries from {mpp_csv if mpp_map else '(none)'}\n")
+
     # Datasets
     print("Building datasets...")
     train_dataset = WSITileDataset(
         train_paths, transform=transform, mag=args.mag, patch_size=args.patch_size,
-        tiles_per_wsi=args.tiles_per_wsi, seed=args.seed, verbose=args.verbose
+        tiles_per_wsi=args.tiles_per_wsi, seed=args.seed, verbose=args.verbose,
+        mpp_map=mpp_map, num_prep_workers=args.num_prep_workers,
     )
     val_dataset = WSITileDataset(
         val_paths, transform=transform, mag=args.mag, patch_size=args.patch_size,
-        tiles_per_wsi=args.tiles_per_wsi, seed=args.seed, verbose=args.verbose
+        tiles_per_wsi=args.tiles_per_wsi, seed=args.seed, verbose=args.verbose,
+        mpp_map=mpp_map, num_prep_workers=args.num_prep_workers,
     )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
@@ -169,9 +216,24 @@ def main():
 
     # Training loop
     best_val_loss = float("inf")
+    ckpt_path = output_dir / f"best_{args.encoder}_prune{args.prune_layer}_keep{int(args.keep_ratio*100)}.pt"
     early_stopper = EarlyStopping(patience=args.patience, min_delta=1e-5) if args.patience > 0 else None
+    plateau_stopper = (
+        PlateauStopper(
+            patience=args.plateau_patience,
+            min_delta=args.plateau_min_delta,
+            ema_alpha=args.ema_alpha,
+            higher_is_better=True,
+        )
+        if args.val_every_steps > 0
+        else None
+    )
+    global_step = 0
+    plateau_hit = False
 
     for epoch in range(args.epochs):
+        if plateau_hit:
+            break
         # Train
         student_model.train()
         backbone_teacher.eval()
@@ -200,51 +262,63 @@ def main():
 
             train_loss += loss.item() * len(tiles)
             train_count += len(tiles)
+            global_step += 1
 
-        train_loss /= train_count
+            # Intra-epoch fast validation + plateau check
+            if plateau_stopper is not None and global_step % args.val_every_steps == 0:
+                fv_loss, fv_cos, _ = run_validation(
+                    student_model, backbone_teacher, val_loader, device,
+                    max_batches=args.val_batches,
+                )
+                student_model.train()  # restore train mode
 
-        # Validation
-        student_model.eval()
-        val_loss = 0.0
-        val_count = 0
+                if fv_loss < best_val_loss:
+                    best_val_loss = fv_loss
+                    torch.save(student_model.state_dict(), ckpt_path)
 
-        with torch.no_grad():
-            for tiles in tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [val]", leave=False):
-                tiles = tiles.to(device)
+                if args.wandb_project:
+                    wandb.log({
+                        "step": global_step,
+                        "fastval/loss": fv_loss,
+                        "fastval/cos": fv_cos,
+                        "fastval/cos_ema": plateau_stopper.smoothed if plateau_stopper.smoothed is not None else fv_cos,
+                    })
 
-                # Teacher
-                teacher_features = backbone_teacher.forward_features(tiles)
-                teacher_cls = teacher_features[:, 0, :]
+                if plateau_stopper.step(fv_cos):
+                    print(f"\n[plateau] step {global_step}: cos EMA stalled "
+                          f"({plateau_stopper.smoothed:.4f}). Stopping training.")
+                    plateau_hit = True
+                    break
 
-                # Student
-                student_cls = student_model.get_cls_embedding(tiles)
+        train_loss /= max(train_count, 1)
 
-                loss = cosine_distance(student_cls, teacher_cls)
-                val_loss += loss.item() * len(tiles)
-                val_count += len(tiles)
+        # Full validation at end of epoch
+        val_loss, val_cos, val_count = run_validation(
+            student_model, backbone_teacher, val_loader, device,
+            max_batches=None,
+        )
 
-        val_loss /= max(val_count, 1)
         scheduler.step()
 
-        print(f"Epoch {epoch+1:3d} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f}")
+        print(f"Epoch {epoch+1:3d} | train_loss={train_loss:.4f} | "
+              f"val_loss={val_loss:.4f}  val_cos={val_cos:.4f}")
 
         if args.wandb_project:
             wandb.log({
                 "epoch": epoch + 1,
                 "train/loss": train_loss,
                 "val/loss": val_loss,
+                "val/cos": val_cos,
                 "lr": optimizer.param_groups[0]["lr"],
             })
 
         # Save best
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            ckpt_path = output_dir / \
-                f"best_{args.encoder}_prune{args.prune_layer}_keep{int(args.keep_ratio*100)}.pt"
             torch.save(student_model.state_dict(), ckpt_path)
             print(f"  → Saved: {ckpt_path}")
 
-        # Early stopping
+        # Epoch-level early stopping (fallback)
         if early_stopper is not None:
             if early_stopper.step(val_loss):
                 print(f"Early stopping triggered at epoch {epoch + 1}")

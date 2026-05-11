@@ -1,115 +1,34 @@
 """Phase 3 (new): In-memory WSI-level classification evaluation.
 
 Compares pruned vs non-pruned encoder on a Patho-Bench task.
-Extracts patch embeddings, mean-pools to slide level, runs logistic regression.
-Zero HDF5 files; fully in-memory.
+Extracts ALL tile embeddings per WSI; aggregates them per slide with a
+Gated-Attention MIL classifier (Ilse et al., 2018) — no mean pooling.
+
+Precision policy:
+  - Unpruned encoder forward: bf16 autocast (fast, accuracy unaffected)
+  - Pruned encoder forward:   fp32 (no autocast) — user-requested
 """
 
 import argparse
 import sys
-import time
 from pathlib import Path
-from collections import defaultdict
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from trident import load_wsi
 from trident.patch_encoder_models import encoder_factory
-from trident.wsi_objects.WSIPatcher import WSIPatcher
-from trident.segmentation_models import segmentation_model_factory
 
-from src.models import AttentionForecaster, GenericLoRAWithForecasterPruning
+from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
+                        GatedAttentionMIL)
 from src.models.backbone_adapter import BackboneAdapter
 from src.utils import set_seed, get_device
-
-
-def extract_slide_embeddings(
-    wsi_path: str,
-    encoder: torch.nn.Module,
-    mag: int,
-    patch_size: int,
-    batch_size: int,
-    device: str,
-) -> torch.Tensor:
-    """Extract mean-pooled slide embedding from a WSI.
-
-    Args:
-        wsi_path: Path to WSI file
-        encoder: loaded encoder (backbone or pruned model)
-        mag: magnification
-        patch_size: patch size
-        batch_size: batch size for inference
-        device: cuda/cpu
-
-    Returns:
-        Slide embedding tensor (D,)
-    """
-    try:
-        wsi = load_wsi(wsi_path)
-        otsu = segmentation_model_factory("otsu")
-        mask_gdf = wsi.segment_tissue(otsu, target_mag=1.25, job_dir=None)
-
-        patcher = WSIPatcher(
-            wsi, patch_size=patch_size, dst_mag=mag,
-            mask=mask_gdf, pil=True,
-        )
-
-        # Extract embeddings for all patches
-        embeddings = []
-        patch_count = len(patcher)
-
-        if patch_count == 0:
-            return torch.ones(1024, device=device) * -1.0  # dummy invalid embedding
-
-        # Batch processing
-        for i in range(0, patch_count, batch_size):
-            batch_idx = list(range(i, min(i + batch_size, patch_count)))
-            tiles = []
-            for idx in batch_idx:
-                tile, _, _ = patcher[idx]
-                # Transform happens inside the encoder typically, but let's handle both
-                if hasattr(encoder, 'eval_transforms'):
-                    tile_tensor = encoder.eval_transforms(tile).unsqueeze(0)
-                else:
-                    tile_tensor = torch.from_numpy(np.array(tile)).permute(2, 0, 1).float().unsqueeze(0) / 255.0
-                tiles.append(tile_tensor)
-
-            tiles_batch = torch.cat(tiles, dim=0).to(device)
-
-            with torch.no_grad():
-                if isinstance(encoder, GenericLoRAWithForecasterPruning):
-                    # Pruned model: extract CLS before head
-                    x = tiles_batch
-                    for block in encoder.backbone.model.blocks:
-                        x = block(x)
-                    x = encoder.backbone.model.norm(x)
-                    batch_emb = x[:, 0, :]  # CLS token
-                else:
-                    # Raw backbone encoder
-                    x = tiles_batch
-                    for block in encoder.blocks:
-                        x = block(x)
-                    x = encoder.norm(x)
-                    batch_emb = x[:, 0, :]  # CLS token
-
-                embeddings.append(batch_emb.cpu())
-
-        all_emb = torch.cat(embeddings, dim=0)  # (N_patches, D)
-
-        # Mean pool
-        return all_emb.mean(dim=0)
-
-    except Exception as e:
-        print(f"Error processing {wsi_path}: {e}")
-        return None
 
 
 def main():
@@ -126,6 +45,9 @@ def main():
                         help="Patho-Bench task (e.g., subtype)")
     parser.add_argument("--wsi-dir", type=str, required=True,
                         help="Directory containing WSI files")
+    parser.add_argument("--wsi-list-csv", type=str, default=None,
+                        help="Optional CSV with `wsi` and `mpp` columns. Defaults to "
+                             "<wsi-dir>/wsi_list.csv if present.")
     parser.add_argument("--splits-dir", type=str, default="./patho_bench_splits",
                         help="Where to download Patho-Bench splits")
     # Checkpoints
@@ -138,6 +60,16 @@ def main():
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-prep-workers", type=int, default=8,
+                        help="Parallel subprocesses for one-shot WSI segmentation/indexing")
+    parser.add_argument("--eval-tiles-per-wsi", type=int, default=0,
+                        help="Tiles per WSI for inference. 0 (default) = ALL valid tiles.")
+    # MIL hyperparams
+    parser.add_argument("--mil-hidden", type=int, default=256)
+    parser.add_argument("--mil-dropout", type=float, default=0.25)
+    parser.add_argument("--mil-epochs", type=int, default=50)
+    parser.add_argument("--mil-lr", type=float, default=1e-3)
+    parser.add_argument("--mil-weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     # Output
     parser.add_argument("--output-dir", type=str, required=True)
@@ -178,13 +110,18 @@ def main():
     print(f"Loaded split with {len(split_df)} samples")
     print(f"Columns: {split_df.columns.tolist()}\n")
 
-    # Map slide_id to WSI path
+    # Map slide_id to WSI path (recursive: data/LUAD/uuid/*.svs etc.)
+    from src.data.wsi_tile_dataset import load_mpp_map
     wsi_dir = Path(args.wsi_dir)
-    wsi_files = list(wsi_dir.glob("*.svs")) + list(wsi_dir.glob("*.ndpi")) + \
-                list(wsi_dir.glob("*.tif")) + list(wsi_dir.glob("*.tiff"))
+    wsi_files = list(wsi_dir.glob("**/*.svs")) + list(wsi_dir.glob("**/*.ndpi")) + \
+                list(wsi_dir.glob("**/*.tif")) + list(wsi_dir.glob("**/*.tiff"))
     slide_id_to_path = {p.stem: str(p) for p in wsi_files}
 
-    print(f"Found {len(wsi_files)} WSI files in {wsi_dir}\n")
+    mpp_csv = args.wsi_list_csv or str(wsi_dir / "wsi_list.csv")
+    mpp_map = load_mpp_map(mpp_csv)
+
+    print(f"Found {len(wsi_files)} WSI files in {wsi_dir}")
+    print(f"MPP map: {len(mpp_map)} entries from {mpp_csv if mpp_map else '(none)'}\n")
 
     # Load models
     print("Loading encoders...")
@@ -218,132 +155,201 @@ def main():
     pruned_model.load_state_dict(torch.load(args.pruned_ckpt, map_location=device))
     pruned_model.eval()
 
-    # Extract embeddings
-    print("Extracting embeddings...\n")
+    # Build a single global DataLoader over ALL valid tiles of ALL WSIs.
+    # WSITileDataset segments every slide in parallel up-front, then streams
+    # tiles via worker processes so the GPU is kept fed continuously.
+    from src.data.wsi_tile_dataset import WSITileDataset
 
-    embeddings_unpruned = {}
-    embeddings_pruned = {}
+    rows_with_files = []
+    for _, row in split_df.iterrows():
+        slide_id = row.get('slide_id', row.get('sample_id'))
+        if slide_id in slide_id_to_path:
+            rows_with_files.append((
+                slide_id, slide_id_to_path[slide_id],
+                row.get('label', row.get(split_df.columns[2])),
+                row.get('fold'),
+            ))
+        else:
+            print(f"  Warning: No WSI file found for {slide_id}")
 
-    for fold_name in split_df['fold'].unique():
-        fold_df = split_df[split_df['fold'] == fold_name]
-        print(f"Fold: {fold_name} ({len(fold_df)} samples)")
+    aligned_paths = [r[1] for r in rows_with_files]
+    aligned_slide_ids = [r[0] for r in rows_with_files]
+    aligned_labels_raw = [r[2] for r in rows_with_files]
+    aligned_folds = [r[3] for r in rows_with_files]
+    path_to_slide_idx = {p: i for i, p in enumerate(aligned_paths)}
+    n_slides = len(aligned_paths)
 
-        for idx, row in tqdm(fold_df.iterrows(), total=len(fold_df), leave=False):
-            slide_id = row.get('slide_id', row.get('sample_id'))
-            label = row.get('label', row.get(split_df.columns[2]))
+    # Encode labels to integers
+    unique_labels = sorted(set(aligned_labels_raw))
+    label_to_int = {lab: i for i, lab in enumerate(unique_labels)}
+    aligned_labels = np.array([label_to_int[l] for l in aligned_labels_raw],
+                              dtype=np.int64)
+    n_classes = len(unique_labels)
+    print(f"Classes: {label_to_int}")
 
-            if slide_id not in slide_id_to_path:
-                print(f"  Warning: No WSI file found for {slide_id}")
-                continue
+    tiles_arg = None if args.eval_tiles_per_wsi <= 0 else args.eval_tiles_per_wsi
+    print(f"Indexing {n_slides} WSIs (tiles_per_wsi={'ALL' if tiles_arg is None else tiles_arg})...")
+    eval_dataset = WSITileDataset(
+        aligned_paths, transform=transform,
+        mag=args.mag, patch_size=args.patch_size,
+        tiles_per_wsi=tiles_arg, seed=args.seed,
+        verbose=True, mpp_map=mpp_map,
+        num_prep_workers=args.num_prep_workers,
+    )
 
-            wsi_path = slide_id_to_path[slide_id]
+    tile_slide_idx = torch.tensor(
+        [path_to_slide_idx[rec[0]] for rec in eval_dataset.tile_records],
+        dtype=torch.long,
+    )
 
-            # Extract embeddings
-            emb_unpruned = extract_slide_embeddings(
-                wsi_path, backbone, args.mag, args.patch_size,
-                args.batch_size, str(device)
-            )
-            emb_pruned = extract_slide_embeddings(
-                wsi_path, pruned_model, args.mag, args.patch_size,
-                args.batch_size, str(device)
-            )
+    class _IndexedTileDataset(torch.utils.data.Dataset):
+        def __init__(self, base, slide_idx):
+            self.base = base
+            self.slide_idx = slide_idx
+        def __len__(self):
+            return len(self.base)
+        def __getitem__(self, i):
+            return self.base[i], int(self.slide_idx[i])
 
-            if emb_unpruned is not None:
-                embeddings_unpruned[slide_id] = (emb_unpruned.numpy(), label)
-            if emb_pruned is not None:
-                embeddings_pruned[slide_id] = (emb_pruned.numpy(), label)
+    indexed = _IndexedTileDataset(eval_dataset, tile_slide_idx)
+    loader = DataLoader(
+        indexed, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=(str(device) == "cuda"),
+        drop_last=False,
+    )
 
-        print(f"  Extracted: unpruned={len(embeddings_unpruned)} pruned={len(embeddings_pruned)}\n")
+    # Preallocate per-slide tile-embedding bags (CPU fp32). Counts come from
+    # the indexed tile_records so each bag has exact size.
+    D = adapter.embed_dim
+    slide_n_tiles = [0] * n_slides
+    for rec in eval_dataset.tile_records:
+        slide_n_tiles[path_to_slide_idx[rec[0]]] += 1
 
-    # Prepare train/test data
-    if 'fold' in split_df.columns:
-        train_mask = split_df['fold'] != 'test'
-        test_mask = split_df['fold'] == 'test'
-    else:
-        train_mask = split_df['fold'] == 'train'
-        test_mask = split_df['fold'] == 'test'
+    total_tiles = sum(slide_n_tiles)
+    cpu_gb = total_tiles * D * 4 * 2 / (1024**3)  # fp32, two models
+    print(f"Total tiles: {total_tiles} | bag storage ≈ {cpu_gb:.2f} GB CPU RAM\n")
 
-    train_df = split_df[train_mask]
-    test_df = split_df[test_mask]
+    bags_un = [torch.empty(n, D, dtype=torch.float32) for n in slide_n_tiles]
+    bags_pr = [torch.empty(n, D, dtype=torch.float32) for n in slide_n_tiles]
+    fill_ptr = [0] * n_slides
 
-    # Extract features for sklearn
-    def prepare_for_sklearn(embeddings_dict, df):
-        X = []
-        y = []
-        valid_ids = []
-        for idx, row in df.iterrows():
-            slide_id = row.get('slide_id', row.get('sample_id'))
-            if slide_id in embeddings_dict:
-                emb, label = embeddings_dict[slide_id]
-                X.append(emb)
-                y.append(label)
-                valid_ids.append(slide_id)
-        if len(X) == 0:
-            return None, None, None
-        return np.array(X), np.array(y), valid_ids
+    use_amp = (str(device) == "cuda")
+    amp_ctx_unpruned = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if use_amp else torch.cuda.amp.autocast(enabled=False)
+    )
 
-    X_train_unpruned, y_train, _ = prepare_for_sklearn(embeddings_unpruned, train_df)
-    X_test_unpruned, y_test, _ = prepare_for_sklearn(embeddings_unpruned, test_df)
-    X_train_pruned, _, _ = prepare_for_sklearn(embeddings_pruned, train_df)
-    X_test_pruned, _, _ = prepare_for_sklearn(embeddings_pruned, test_df)
+    with torch.no_grad():
+        for tiles, sidx in tqdm(loader, desc="Forward", total=len(loader)):
+            tiles = tiles.to(device, non_blocking=True)
+            # Unpruned: bf16 autocast (faster, accuracy unchanged for ViT).
+            with amp_ctx_unpruned:
+                f_un = backbone.forward_features(tiles)[:, 0, :]
+            f_un = f_un.float().cpu()
+            # Pruned: fp32, no autocast (user-requested).
+            f_pr = pruned_model.raw_backbone.forward_features(tiles)[:, 0, :]
+            f_pr = f_pr.float().cpu()
 
-    if X_train_unpruned is None or X_train_pruned is None:
-        print("Error: No valid embeddings extracted!")
-        return
+            # Scatter into per-slide bags. shuffle=False means tiles arrive in
+            # WSI order, so usually only 1-2 distinct slides per batch.
+            unique_sidx, inverse = sidx.unique(return_inverse=True)
+            for ui, s in enumerate(unique_sidx.tolist()):
+                mask = (inverse == ui)
+                n = int(mask.sum())
+                bags_un[s][fill_ptr[s]:fill_ptr[s]+n] = f_un[mask]
+                bags_pr[s][fill_ptr[s]:fill_ptr[s]+n] = f_pr[mask]
+                fill_ptr[s] += n
 
-    print(f"Train: {len(X_train_unpruned)} samples")
-    print(f"Test: {len(X_test_unpruned)} samples\n")
+    # Slides with no tiles (segmentation produced nothing) are dropped.
+    valid_slides = [i for i in range(n_slides) if fill_ptr[i] > 0]
+    n_dropped = n_slides - len(valid_slides)
+    print(f"\n  Extracted bags for {len(valid_slides)} slides "
+          f"({n_dropped} dropped: empty/failed segmentation)\n")
 
-    # Run logistic regression
-    print("Running logistic regression...\n")
+    # Free GPU model memory before MIL training — MIL fits on a small fraction.
+    del backbone, pruned_model, forecaster
+    torch.cuda.empty_cache() if str(device) == "cuda" else None
 
-    results = {}
+    # Train/test fold masks
+    fold_arr = np.array(aligned_folds)
+    train_idx = [i for i in valid_slides if fold_arr[i] != "test"]
+    test_idx = [i for i in valid_slides if fold_arr[i] == "test"]
+    print(f"Train slides: {len(train_idx)} | Test slides: {len(test_idx)}\n")
 
-    for model_name, X_train, X_test in [
-        ("unpruned", X_train_unpruned, X_test_unpruned),
-        ("pruned", X_train_pruned, X_test_pruned),
-    ]:
-        print(f"  {model_name.upper()}:")
-        clf = LogisticRegression(max_iter=1000, random_state=args.seed)
-        clf.fit(X_train, y_train)
+    def train_eval_mil(bags, name):
+        set_seed(args.seed)
+        model = GatedAttentionMIL(
+            in_dim=D, hidden=args.mil_hidden, n_classes=n_classes,
+            dropout=args.mil_dropout,
+        ).to(device)
+        opt = torch.optim.Adam(
+            model.parameters(), lr=args.mil_lr,
+            weight_decay=args.mil_weight_decay,
+        )
+        loss_fn = nn.CrossEntropyLoss()
 
-        y_pred = clf.predict(X_test)
-        y_proba = clf.predict_proba(X_test)
+        train_order = list(train_idx)
+        rng = np.random.RandomState(args.seed)
+        print(f"  Training MIL on {name}...")
+        for epoch in range(args.mil_epochs):
+            model.train()
+            rng.shuffle(train_order)
+            ep_loss, ep_correct = 0.0, 0
+            for i in train_order:
+                bag = bags[i].to(device, non_blocking=True)
+                y = torch.tensor([aligned_labels[i]], device=device, dtype=torch.long)
+                logits = model(bag).unsqueeze(0)
+                loss = loss_fn(logits, y)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                ep_loss += loss.item()
+                ep_correct += int(logits.argmax(-1).item() == int(y.item()))
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                print(f"    Epoch {epoch+1:3d}/{args.mil_epochs}: "
+                      f"loss={ep_loss/len(train_order):.4f} "
+                      f"acc={ep_correct/len(train_order):.4f}")
 
-        acc = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+        model.eval()
+        y_true, y_pred, y_proba = [], [], []
+        with torch.no_grad():
+            for i in test_idx:
+                bag = bags[i].to(device, non_blocking=True)
+                logits = model(bag)
+                proba = logits.softmax(-1).cpu().numpy()
+                y_true.append(int(aligned_labels[i]))
+                y_pred.append(int(proba.argmax()))
+                y_proba.append(proba)
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+        y_proba = np.array(y_proba)
 
+        acc = accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
         try:
-            if len(np.unique(y_test)) == 2:
-                auc = roc_auc_score(y_test, y_proba[:, 1])
-            else:
-                auc = roc_auc_score(y_test, y_proba, multi_class="ovr", zero_division=0)
-        except:
+            auc = (roc_auc_score(y_true, y_proba[:, 1]) if n_classes == 2
+                   else roc_auc_score(y_true, y_proba, multi_class="ovr"))
+        except Exception:
             auc = 0.0
+        print(f"  {name.upper()}: acc={acc:.4f}  f1={f1:.4f}  auc={auc:.4f}\n")
+        return {"accuracy": acc, "f1": f1, "auc": auc}
 
-        print(f"    Accuracy: {acc:.4f}")
-        print(f"    F1-macro: {f1:.4f}")
-        print(f"    AUC: {auc:.4f}\n")
+    results = {
+        "unpruned": train_eval_mil(bags_un, "unpruned"),
+        "pruned":   train_eval_mil(bags_pr, "pruned"),
+    }
 
-        results[model_name] = {"accuracy": acc, "f1": f1, "auc": auc}
-
-    # Compare
     print(f"{'='*70}")
-    print(f"COMPARISON")
+    print(f"COMPARISON (Gated-Attention MIL)")
     print(f"{'='*70}")
     print(f"Metric          | Unpruned    | Pruned      | Diff")
     print(f"-" * 70)
     for metric in ["accuracy", "f1", "auc"]:
-        unpruned_val = results["unpruned"][metric]
-        pruned_val = results["pruned"][metric]
-        diff = unpruned_val - pruned_val
-        print(f"{metric:15} | {unpruned_val:11.4f} | {pruned_val:11.4f} | {diff:+.4f}")
-
+        u, p = results["unpruned"][metric], results["pruned"][metric]
+        print(f"{metric:15} | {u:11.4f} | {p:11.4f} | {u - p:+.4f}")
     print(f"{'='*70}\n")
 
-    # Save results
-    results_df = pd.DataFrame(results).T
-    results_df.to_csv(output_dir / "evaluation_results.csv")
+    pd.DataFrame(results).T.to_csv(output_dir / "evaluation_results.csv")
     print(f"Saved: {output_dir / 'evaluation_results.csv'}\n")
 
 

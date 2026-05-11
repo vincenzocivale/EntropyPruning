@@ -120,3 +120,65 @@ class EarlyStopping:
     def best(self) -> float:
         """Best metric value seen so far."""
         return self.best_value
+
+
+class PlateauStopper:
+    """Detect plateau on a noisy, higher-is-better metric (e.g. Spearman ρ, cosine sim).
+
+    Designed for intra-epoch use: called every few hundred training steps with a
+    quick validation metric. Smooths the signal with an EMA so isolated noisy
+    drops don't trigger false stops.
+    """
+
+    def __init__(
+        self,
+        patience: int = 5,
+        min_delta: float = 1e-3,
+        ema_alpha: float = 0.3,
+        higher_is_better: bool = True,
+        warmup: int = 2,
+    ):
+        """
+        Args:
+            patience: Number of consecutive checks with no EMA improvement before stopping.
+            min_delta: Minimum EMA change considered an improvement.
+            ema_alpha: EMA smoothing factor in (0, 1]. Higher = less smoothing.
+            higher_is_better: True for ρ / cosine sim; False for losses.
+            warmup: Number of initial calls used only to seed the EMA (no stop possible).
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.ema_alpha = ema_alpha
+        self.higher_is_better = higher_is_better
+        self.warmup = warmup
+
+        self.ema: float | None = None
+        self.best_ema: float = -float("inf") if higher_is_better else float("inf")
+        self.wait_count = 0
+        self.calls = 0
+
+    def step(self, current: float) -> bool:
+        """Update with a new metric reading. Returns True if training should stop."""
+        self.calls += 1
+        self.ema = current if self.ema is None else self.ema_alpha * current + (1 - self.ema_alpha) * self.ema
+
+        if self.calls <= self.warmup:
+            self.best_ema = self.ema
+            return False
+
+        improved = (
+            self.ema > self.best_ema + self.min_delta
+            if self.higher_is_better
+            else self.ema < self.best_ema - self.min_delta
+        )
+        if improved:
+            self.best_ema = self.ema
+            self.wait_count = 0
+            return False
+        self.wait_count += 1
+        return self.wait_count >= self.patience
+
+    @property
+    def smoothed(self) -> float | None:
+        """Current EMA value (None until first step)."""
+        return self.ema

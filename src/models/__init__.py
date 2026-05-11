@@ -10,3 +10,4 @@ from .classifier import (
 )
 from .forecaster import AttentionForecaster
 from .pruned_classifier import GenericLoRAWithForecasterPruning
+from .abmil import GatedAttentionMIL
