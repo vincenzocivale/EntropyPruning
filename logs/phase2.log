@@ -1,0 +1,278 @@
+/data2/home/vcivale/miniconda3/envs/eaf_env/lib/python3.11/site-packages/outdated/__init__.py:36: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import parse_version
+/data2/home/vcivale/projects/imaging/EAF/src/models/lora_classifier.py:84: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(Path(ckpt_path), map_location=map_location)
+
+train:   0%|          | 0/15 [00:00<?, ?it/s]
+train:   7%|▋         | 1/15 [00:04<01:04,  4.60s/it]
+train:  13%|█▎        | 2/15 [00:05<00:30,  2.32s/it]
+train:  20%|██        | 3/15 [00:06<00:20,  1.67s/it]
+train:  27%|██▋       | 4/15 [00:06<00:13,  1.27s/it]
+train:  33%|███▎      | 5/15 [00:07<00:10,  1.04s/it]
+train:  40%|████      | 6/15 [00:08<00:08,  1.04it/s]
+train:  47%|████▋     | 7/15 [00:09<00:07,  1.09it/s]
+train:  53%|█████▎    | 8/15 [00:09<00:05,  1.18it/s]
+train:  60%|██████    | 9/15 [00:10<00:04,  1.22it/s]
+train:  67%|██████▋   | 10/15 [00:11<00:04,  1.23it/s]
+train:  73%|███████▎  | 11/15 [00:12<00:03,  1.33it/s]
+train:  80%|████████  | 12/15 [00:12<00:02,  1.41it/s]
+train:  87%|████████▋ | 13/15 [00:13<00:01,  1.40it/s]
+train:  93%|█████████▎| 14/15 [00:14<00:00,  1.32it/s]
+train: 100%|██████████| 15/15 [00:14<00:00,  1.42it/s]
+train: 100%|██████████| 15/15 [00:14<00:00,  1.01it/s]
+
+val:   0%|          | 0/4 [00:00<?, ?it/s]
+val:  25%|██▌       | 1/4 [00:02<00:08,  2.87s/it]
+val:  50%|█████     | 2/4 [00:03<00:03,  1.60s/it]
+val:  75%|███████▌  | 3/4 [00:04<00:01,  1.19s/it]
+val: 100%|██████████| 4/4 [00:04<00:00,  1.09s/it]
+
+test:   0%|          | 0/6 [00:00<?, ?it/s]
+test:  17%|█▋        | 1/6 [00:03<00:18,  3.77s/it]
+test:  33%|███▎      | 2/6 [00:04<00:07,  1.96s/it]
+test:  50%|█████     | 3/6 [00:05<00:04,  1.44s/it]
+test:  67%|██████▋   | 4/6 [00:06<00:02,  1.18s/it]
+test:  83%|████████▎ | 5/6 [00:06<00:00,  1.03it/s]
+test: 100%|██████████| 6/6 [00:06<00:00,  1.36it/s]
+test: 100%|██████████| 6/6 [00:06<00:00,  1.16s/it]
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /data2/home/vcivale/.netrc.
+wandb: Currently logged in as: vincenzo-civale (vincenzo-civale-universi-degli-studi-di-firenze) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: WARNING Using a boolean value for 'reinit' is deprecated. Use 'return_previous' or 'finish_previous' instead.
+wandb: setting up run 4n62rees
+wandb: Tracking run with wandb version 0.26.1
+wandb: Run data is saved locally in /data2/home/vcivale/projects/imaging/EAF/wandb/run-20260611_123247-4n62rees
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run uni_break_his_phase2_src02_tgt23
+wandb: ⭐️ View project at https://wandb.ai/vincenzo-civale-universi-degli-studi-di-firenze/attention-forecaster
+wandb: 🚀 View run at https://wandb.ai/vincenzo-civale-universi-degli-studi-di-firenze/attention-forecaster/runs/4n62rees
+
+Ep1 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep1 train:  12%|█▎        | 1/8 [00:02<00:16,  2.30s/it]
+Ep1 train:  75%|███████▌  | 6/8 [00:02<00:00,  3.30it/s]
+                                                        
+
+Ep2 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep2 train:  12%|█▎        | 1/8 [00:00<00:05,  1.31it/s]
+Ep2 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.93it/s]
+                                                        
+
+Ep3 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep3 train:  12%|█▎        | 1/8 [00:00<00:06,  1.16it/s]
+Ep3 train:  62%|██████▎   | 5/8 [00:01<00:00,  6.26it/s]
+                                                        
+
+Ep4 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep4 train:  12%|█▎        | 1/8 [00:00<00:05,  1.37it/s]
+Ep4 train:  25%|██▌       | 2/8 [00:00<00:02,  2.69it/s]
+Ep4 train:  75%|███████▌  | 6/8 [00:00<00:00,  9.43it/s]
+                                                        
+
+Ep5 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep5 train:  12%|█▎        | 1/8 [00:00<00:05,  1.30it/s]
+Ep5 train:  50%|█████     | 4/8 [00:00<00:00,  5.74it/s]
+Ep5 train:  88%|████████▊ | 7/8 [00:00<00:00,  9.72it/s]
+                                                        
+
+Ep6 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep6 train:  12%|█▎        | 1/8 [00:00<00:05,  1.20it/s]
+Ep6 train:  62%|██████▎   | 5/8 [00:01<00:00,  6.10it/s]
+                                                        
+
+Ep7 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep7 train:  12%|█▎        | 1/8 [00:00<00:05,  1.18it/s]
+Ep7 train:  75%|███████▌  | 6/8 [00:01<00:00,  7.41it/s]
+                                                        
+
+Ep8 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep8 train:  12%|█▎        | 1/8 [00:00<00:05,  1.23it/s]
+Ep8 train:  62%|██████▎   | 5/8 [00:01<00:00,  6.21it/s]
+                                                        
+
+Ep9 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep9 train:  12%|█▎        | 1/8 [00:00<00:05,  1.27it/s]
+Ep9 train:  50%|█████     | 4/8 [00:00<00:00,  5.64it/s]
+Ep9 train:  88%|████████▊ | 7/8 [00:00<00:00,  9.86it/s]
+                                                        
+
+Ep10 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep10 train:  12%|█▎        | 1/8 [00:00<00:06,  1.15it/s]
+Ep10 train:  62%|██████▎   | 5/8 [00:01<00:00,  6.27it/s]
+                                                         
+
+Ep11 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep11 train:  12%|█▎        | 1/8 [00:00<00:05,  1.17it/s]
+Ep11 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.37it/s]
+                                                         
+
+Ep12 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep12 train:  12%|█▎        | 1/8 [00:00<00:05,  1.18it/s]
+Ep12 train:  50%|█████     | 4/8 [00:00<00:00,  5.22it/s]
+Ep12 train:  75%|███████▌  | 6/8 [00:01<00:00,  7.67it/s]
+                                                         
+
+Ep13 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep13 train:  12%|█▎        | 1/8 [00:01<00:07,  1.10s/it]
+Ep13 train:  25%|██▌       | 2/8 [00:01<00:04,  1.47it/s]
+Ep13 train:  75%|███████▌  | 6/8 [00:01<00:00,  5.29it/s]
+                                                         
+
+Ep14 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep14 train:  12%|█▎        | 1/8 [00:00<00:05,  1.31it/s]
+Ep14 train:  62%|██████▎   | 5/8 [00:00<00:00,  7.00it/s]
+Ep14 train:  88%|████████▊ | 7/8 [00:01<00:00,  9.26it/s]
+                                                         
+
+Ep15 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep15 train:  12%|█▎        | 1/8 [00:00<00:06,  1.17it/s]
+Ep15 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.52it/s]
+                                                         
+
+Ep16 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep16 train:  12%|█▎        | 1/8 [00:00<00:05,  1.29it/s]
+Ep16 train:  50%|█████     | 4/8 [00:00<00:00,  5.69it/s]
+Ep16 train:  75%|███████▌  | 6/8 [00:01<00:00,  7.73it/s]
+                                                         
+
+Ep17 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep17 train:  12%|█▎        | 1/8 [00:00<00:05,  1.39it/s]
+Ep17 train:  25%|██▌       | 2/8 [00:00<00:02,  2.59it/s]
+Ep17 train:  75%|███████▌  | 6/8 [00:01<00:00,  8.27it/s]
+                                                         
+
+Ep18 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep18 train:  12%|█▎        | 1/8 [00:00<00:05,  1.32it/s]
+Ep18 train:  50%|█████     | 4/8 [00:00<00:00,  5.69it/s]
+Ep18 train:  88%|████████▊ | 7/8 [00:00<00:00,  9.80it/s]
+                                                         
+
+Ep19 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep19 train:  12%|█▎        | 1/8 [00:00<00:05,  1.37it/s]
+Ep19 train:  38%|███▊      | 3/8 [00:00<00:01,  4.14it/s]
+Ep19 train:  75%|███████▌  | 6/8 [00:00<00:00,  8.53it/s]
+                                                         
+
+Ep20 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep20 train:  12%|█▎        | 1/8 [00:00<00:05,  1.30it/s]
+Ep20 train:  38%|███▊      | 3/8 [00:00<00:01,  4.22it/s]
+Ep20 train:  88%|████████▊ | 7/8 [00:00<00:00, 10.39it/s]
+                                                         
+
+Ep21 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep21 train:  12%|█▎        | 1/8 [00:00<00:05,  1.30it/s]
+Ep21 train:  50%|█████     | 4/8 [00:00<00:00,  5.65it/s]
+Ep21 train:  88%|████████▊ | 7/8 [00:00<00:00,  9.90it/s]
+                                                         
+
+Ep22 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep22 train:  12%|█▎        | 1/8 [00:00<00:05,  1.36it/s]
+Ep22 train:  38%|███▊      | 3/8 [00:00<00:01,  4.28it/s]
+Ep22 train:  75%|███████▌  | 6/8 [00:00<00:00,  9.00it/s]
+                                                         
+
+Ep23 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep23 train:  12%|█▎        | 1/8 [00:00<00:05,  1.27it/s]
+Ep23 train:  75%|███████▌  | 6/8 [00:00<00:00,  8.42it/s]
+                                                         
+
+Ep24 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep24 train:  12%|█▎        | 1/8 [00:00<00:05,  1.21it/s]
+Ep24 train:  75%|███████▌  | 6/8 [00:00<00:00,  8.24it/s]
+                                                         
+
+Ep25 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep25 train:  12%|█▎        | 1/8 [00:00<00:05,  1.25it/s]
+Ep25 train:  75%|███████▌  | 6/8 [00:00<00:00,  7.94it/s]
+                                                         
+
+Ep26 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep26 train:  12%|█▎        | 1/8 [00:00<00:05,  1.27it/s]
+Ep26 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.80it/s]
+                                                         
+
+Ep27 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep27 train:  12%|█▎        | 1/8 [00:00<00:05,  1.26it/s]
+Ep27 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.92it/s]
+                                                         
+
+Ep28 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep28 train:  12%|█▎        | 1/8 [00:00<00:06,  1.13it/s]
+Ep28 train:  62%|██████▎   | 5/8 [00:01<00:00,  6.32it/s]
+                                                         
+
+Ep29 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep29 train:  12%|█▎        | 1/8 [00:00<00:05,  1.25it/s]
+Ep29 train:  62%|██████▎   | 5/8 [00:00<00:00,  6.90it/s]
+                                                         
+
+Ep30 train:   0%|          | 0/8 [00:00<?, ?it/s]
+Ep30 train:  12%|█▎        | 1/8 [00:00<00:05,  1.40it/s]
+Ep30 train:  38%|███▊      | 3/8 [00:00<00:01,  4.33it/s]
+Ep30 train:  75%|███████▌  | 6/8 [00:00<00:00,  8.74it/s]
+                                                         
+/data2/home/vcivale/projects/imaging/EAF/scripts/train_forecaster.py:129: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  forecaster.load_state_dict(torch.load(save_path, map_location=device))
+wandb: updating run metadata
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml
+wandb: uploading console lines 2-12
+wandb: 
+wandb: Run history:
+wandb:               epoch ▁▁▁▂▂▂▂▃▃▃▃▄▄▄▄▅▅▅▅▆▆▆▆▇▇▇▇███
+wandb:                  lr █████▇▇▇▇▆▆▆▅▅▅▄▄▃▃▃▂▂▂▂▁▁▁▁▁▁
+wandb:  test/delta_vs_norm ▁
+wandb:    test/overlap@0.1 ▁
+wandb:    test/overlap@0.2 ▁
+wandb:    test/overlap@0.3 ▁
+wandb: test/rho_forecaster ▁
+wandb: test/rho_token_norm ▁
+wandb:          train/loss █▆▅▄▄▃▃▃▃▂▂▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:         val/best_kl ▁
+wandb:                  +3 ...
+wandb: 
+wandb: Run summary:
+wandb:               epoch 30
+wandb:                  lr 0
+wandb:  test/delta_vs_norm 0.5136
+wandb:    test/overlap@0.1 0.39086
+wandb:    test/overlap@0.2 0.48756
+wandb:    test/overlap@0.3 0.55997
+wandb: test/rho_forecaster 0.48268
+wandb: test/rho_token_norm -0.03091
+wandb:          train/loss 0.0826
+wandb:         val/best_kl 0.10561
+wandb:                  +3 ...
+wandb: 
+wandb: 🚀 View run uni_break_his_phase2_src02_tgt23 at: https://wandb.ai/vincenzo-civale-universi-degli-studi-di-firenze/attention-forecaster/runs/4n62rees
+wandb: ⭐️ View project at: https://wandb.ai/vincenzo-civale-universi-degli-studi-di-firenze/attention-forecaster
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20260611_123247-4n62rees/logs
+Device: cuda | Model: uni | Dataset: break_his
+embed_dim=1024  n_blocks=24  n_patches=196  prefix=1
+Loaded Phase-1 LoRA-adapted backbone: checkpoints/break_his/uni_lora_phase1/best_uni_break_his_phase1.pt
+
+Collecting train...
+  train: 936 samples saved
+
+Collecting val...
+  val: 196 samples saved
+
+Collecting test...
+  test: 339 samples saved
+
+============================================================
+  Experiment: uni_break_his_phase2_src02_tgt23
+============================================================
+  Ep 05 | train=0.1065 val_kl=0.1159 val_rho=0.435
+  Ep 10 | train=0.0951 val_kl=0.1080 val_rho=0.487
+  Ep 15 | train=0.0890 val_kl=0.1077 val_rho=0.494
+  Ep 20 | train=0.0849 val_kl=0.1070 val_rho=0.508
+  Ep 25 | train=0.0826 val_kl=0.1058 val_rho=0.512
+  Ep 30 | train=0.0826 val_kl=0.1063 val_rho=0.510
+
+  Test rho forecaster: 0.483
+  Test rho token norm: -0.031
+  Delta vs baseline:   +0.514
+  Test overlap@k:      0.1=0.391, 0.2=0.488, 0.3=0.560
+
+   Layer rho Forecaster rho Baseline    Delta
+----------------------------------------------
+       2          0.483       -0.031   +0.514

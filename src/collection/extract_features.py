@@ -13,11 +13,11 @@ def collect_and_save_dataset(model, loaders_dict, device,
     - Patch embeddings at source layers (spatial tokens only, excluding prefix tokens).
     - CLS-to-patch attention weights at target layers (mean over heads).
 
-    Compatible with any GenericLoRAClassifier wrapping a ThunderBackboneAdapter.
+    Compatible with any frozen model exposing .adapter and .raw_backbone (e.g. FrozenBackbone).
     Dimensions (n_patches, embed_dim) are inferred from model.adapter.
 
     Args:
-        model:        GenericLoRAClassifier (frozen, eval mode). Must have .adapter.
+        model:        frozen model in eval mode with .adapter and .raw_backbone (e.g. FrozenBackbone).
         loaders_dict: {split_name: DataLoader} yielding (imgs, labels) tuples.
         device:       torch device.
         layers_source: list of block indices to extract patch embeddings from.

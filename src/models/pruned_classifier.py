@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
-from peft import LoraConfig
-from peft.tuners.lora import LoraModel
 
 from .backbone_adapter import ThunderBackboneAdapter
+from .lora_utils import wrap_lora
 
 
 class GenericLoRAWithForecasterPruning(nn.Module):
@@ -21,12 +20,14 @@ class GenericLoRAWithForecasterPruning(nn.Module):
         forecaster:  trained AttentionForecaster (must be frozen before passing in).
         prune_layer: block index where pruning is applied (0-indexed).
         keep_ratio:  fraction of spatial patch tokens to keep (e.g. 0.1 = top 10%).
-        lora_r, lora_alpha: LoRA parameters.
+        lora_r, lora_alpha: LoRA parameters (must match Phase 1 for warm-start).
         dropout:     classifier head dropout.
 
     Note:
-        Load Phase 1 checkpoint with strict=False — peft key prefix differs from
-        a plain model, and the forecaster keys are new.
+        ``backbone`` and ``head`` use the same LoRA config and architecture as
+        ``GenericLoRAClassifier`` (Phase 1), so a Phase-1 ``adapted_state_dict()`` can be
+        loaded directly into ``self.backbone`` / ``self.head`` to warm-start training
+        (see ``load_lora_adapted_weights`` and ``scripts/finetune_pruned.py``).
     """
 
     def __init__(self, backbone: nn.Module, adapter: ThunderBackboneAdapter,
@@ -35,12 +36,7 @@ class GenericLoRAWithForecasterPruning(nn.Module):
                  lora_r: int = 8, lora_alpha: int = 32, dropout: float = 0.1):
         super().__init__()
         self.adapter = adapter
-        lora_config = LoraConfig(
-            r=lora_r, lora_alpha=lora_alpha,
-            target_modules=["qkv", "proj", "fc1", "fc2"],
-            lora_dropout=0.1, bias="none",
-        )
-        self.backbone = LoraModel(backbone, lora_config, adapter_name="default")
+        self.backbone = wrap_lora(backbone, lora_r=lora_r, lora_alpha=lora_alpha)
         self.head = nn.Sequential(
             nn.LayerNorm(adapter.embed_dim),
             nn.Dropout(dropout),

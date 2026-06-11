@@ -1,12 +1,10 @@
-"""Phase 3: Fine-tune classifier with forecaster-guided token pruning.
+"""Phase 1: Full-backbone LoRA fine-tuning + classification head on full sequences.
 
-The model (LoRA on qkv/proj/fc1/fc2 of every block + head) is warm-started from Phase 1's
-converged full-network LoRA adapters + head (scripts/train_phase1_lora.py), then fine-tuned
-with pruning active after --prune-layer. This mirrors the paper's Stage1->Stage3 warm start:
-Phase 1's LoRA adapters already converged on the full-sequence task only need to adapt to the
-pruning-induced sequence shortening. Use a reduced --lr-backbone/--lr-head (e.g. 1e-5/1e-4)
-and fewer --epochs for this gentle adaptation -- the full Stage-3 defaults below are
-calibrated for cold-start (no Phase-1 checkpoint found).
+Matches the paper's Stage 1: LoRA adapters on qkv/proj/fc1/fc2 of every Transformer
+block, trained end-to-end with cross-entropy on full (un-pruned) token sequences. The
+resulting LoRA-adapted backbone's final-block CLS->patch attention becomes the Phase-2
+distillation teacher (scripts/train_forecaster.py), and its LoRA adapters + head
+warm-start Phase 3 (scripts/finetune_pruned.py --phase1-ckpt).
 """
 
 import argparse
@@ -23,52 +21,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thunder.models.pretrained_models import get_model_from_name
 
-from src.utils import set_seed, get_device, grad_norm, save_results
-from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
-                        ThunderBackboneAdapter, load_lora_adapted_weights)
+from src.utils import set_seed, get_device, build_optimizer, grad_norm, save_results
+from src.models import ThunderBackboneAdapter, GenericLoRAClassifier
 from src.data.thunder_loaders import build_thunder_loaders
 from src.evaluation import evaluate
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Phase 3: Fine-tune pruned model")
+    parser = argparse.ArgumentParser(description="Phase 1: Full-backbone LoRA fine-tuning + head")
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--dataset-name", type=str, required=True)
     parser.add_argument("--base-data-folder", type=str, required=True)
-    parser.add_argument("--forecaster-ckpt", type=str, default=None)
-    parser.add_argument("--phase1-ckpt", type=str, default=None,
-                        help="Phase-1 full-backbone LoRA checkpoint (see "
-                             "scripts/train_phase1_lora.py), used to warm-start this "
-                             "model's LoRA adapters + head before pruning-aware "
-                             "training. Defaults to "
-                             "checkpoints/<dataset>/<model>_lora_phase1/"
-                             "best_<model>_<dataset>_phase1.pt if present; falls back to "
-                             "cold-start (zero-init LoRA + fresh head) otherwise.")
-    parser.add_argument("--lora-r", type=int, default=8,
-                        help="Must match Phase 1 for warm-start compatibility.")
-    parser.add_argument("--lora-alpha", type=int, default=32,
-                        help="Must match Phase 1 for warm-start compatibility.")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--prune-layer", type=int, default=2)
-    parser.add_argument("--keep-ratio", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr-head", type=float, default=1e-3)
     parser.add_argument("--lr-backbone", type=float, default=1e-4)
+    parser.add_argument("--lr-head", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--far-threshold", type=float, default=1e-4)
-    parser.add_argument("--hidden", type=int, default=256,
-                        help="AttentionForecaster hidden dim — must match Phase 2.")
-    parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=2)
-    parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--wandb-project", type=str, default=None,
                         help="W&B project name (default: None = skip W&B).")
-    parser.add_argument("--early-stopping-patience", type=int, default=3,
-                        help="Epochs without improvement before stopping (default: 3)")
+    parser.add_argument("--early-stopping-patience", type=int, default=8,
+                        help="Epochs without improvement before stopping (default: 8)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -79,22 +59,10 @@ def main():
     adapter = ThunderBackboneAdapter(raw_backbone)
     print(f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
           f"n_patches={adapter.n_patches}  prefix={adapter.num_prefix_tokens}")
-    assert args.prune_layer < adapter.n_blocks, \
-        f"--prune-layer {args.prune_layer} >= n_blocks {adapter.n_blocks}"
 
     base_ckpt = Path("checkpoints")
-
-    default_phase1_ckpt = (base_ckpt / args.dataset_name / f"{args.model_name}_lora_phase1" /
-                            f"best_{args.model_name}_{args.dataset_name}_phase1.pt")
-    phase1_ckpt = Path(args.phase1_ckpt) if args.phase1_ckpt else default_phase1_ckpt
-    use_adapted_backbone = phase1_ckpt.exists()
-
-    forecaster_ckpt = args.forecaster_ckpt or str(
-        base_ckpt / args.dataset_name / f"{args.model_name}_forecaster" /
-        f"forecaster_{args.model_name}_{args.dataset_name}_phase2"
-        f"_src{args.prune_layer:02d}_tgt{adapter.n_blocks-1:02d}.pt")
     output_dir = Path(args.output_dir) if args.output_dir else \
-        base_ckpt / args.dataset_name / f"{args.model_name}_pruned"
+        base_ckpt / args.dataset_name / f"{args.model_name}_lora_phase1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader, val_loader, test_loader, class_names, n_classes = \
@@ -102,64 +70,32 @@ def main():
                               args.batch_size, args.num_workers, drop_last_train=True)
     print(f"Classes ({n_classes}): {class_names}")
 
-    # --- W&B init (before baseline so baseline logs appear at step 0) ---
-    run_name = (f"{args.model_name}_{args.dataset_name}"
-                f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
+    run_name = f"{args.model_name}_{args.dataset_name}_phase1"
     use_wandb = args.wandb_project is not None
     if use_wandb:
         wandb.init(
             project=args.wandb_project,
             name=run_name,
-            job_type="phase3",
+            job_type="phase1",
             group=f"{args.dataset_name}/{args.model_name}",
-            config={**vars(args), "use_adapted_backbone": use_adapted_backbone},
-            tags=[args.model_name, args.dataset_name,
-                  f"prune_layer_{args.prune_layer}",
-                  f"keep_{int(args.keep_ratio * 100)}pct",
-                  "phase3",
-                  "warm_start_phase1" if use_adapted_backbone else "cold_start_lora"],
+            config=vars(args),
+            tags=[args.model_name, args.dataset_name, "phase1", "lora_full_backbone"],
         )
 
-    # --- Forecaster ---
-    forecaster = AttentionForecaster(
-        embed_dim=adapter.embed_dim,
-        hidden=args.hidden, n_heads=args.n_heads,
-        n_layers=args.n_layers, dropout=args.dropout,
-    ).to(device)
-    forecaster.load_state_dict(torch.load(forecaster_ckpt, map_location=device))
-    forecaster.eval()
-    for p in forecaster.parameters():
-        p.requires_grad_(False)
-    print(f"Forecaster loaded: {forecaster_ckpt}")
-
-    # --- Pruned model (LoRA + head, optionally warm-started from Phase 1 below) ---
-    model = GenericLoRAWithForecasterPruning(
+    model = GenericLoRAClassifier(
         backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
-        forecaster=forecaster, prune_layer=args.prune_layer, keep_ratio=args.keep_ratio,
-        lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+        lora_r=args.lora_r, lora_alpha=args.lora_alpha, dropout=args.dropout,
     ).to(device)
-
-    if use_adapted_backbone:
-        load_lora_adapted_weights(model, phase1_ckpt, map_location=device)
-        print(f"Warm-started LoRA adapters + head from Phase 1: {phase1_ckpt}")
-    else:
-        print(f"No Phase-1 checkpoint found at {phase1_ckpt} -- "
-              "starting from cold-start (zero-init LoRA + fresh head).")
 
     pre = evaluate(model, val_loader, device, args.far_threshold)
-    print(f"\nPre fine-tuning val: acc={pre['acc']:.3f}  f1={pre['f1_macro']:.3f}")
+    print(f"\nPre-training val: acc={pre['acc']:.3f}  f1={pre['f1_macro']:.3f}")
     if use_wandb:
         wandb.config.update({
             "pre_val_acc": pre["acc"],
             "pre_val_f1_macro": pre["f1_macro"],
         })
 
-    # --- Optimizer (AMP) ---
-    backbone_params = [p for _, p in model.backbone.named_parameters() if p.requires_grad]
-    opt = torch.optim.AdamW([
-        {"params": backbone_params, "lr": args.lr_backbone},
-        {"params": model.head.parameters(), "lr": args.lr_head},
-    ], weight_decay=args.weight_decay)
+    opt = build_optimizer(model, args.lr_backbone, args.lr_head, args.weight_decay)
     total_steps = args.epochs * len(train_loader)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=[args.lr_backbone, args.lr_head],
@@ -167,7 +103,6 @@ def main():
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     scaler = GradScaler("cuda")
 
-    # --- Training ---
     best_val_f1 = 0.
     ckpt_name = f"best_{run_name}.pt"
     history = []
@@ -228,7 +163,7 @@ def main():
         if val_m["f1_macro"] > best_val_f1:
             best_val_f1 = val_m["f1_macro"]
             epochs_without_improvement = 0
-            torch.save(model.state_dict(), output_dir / ckpt_name)
+            torch.save(model.adapted_state_dict(), output_dir / ckpt_name)
         else:
             epochs_without_improvement += 1
             if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
@@ -239,8 +174,8 @@ def main():
               f"gnorm={row['train_grad_norm']:.3f}  "
               f"f1_val={val_m['f1_macro']:.4f}  best={best_val_f1:.4f}")
 
-    # --- Test evaluation ---
-    model.load_state_dict(torch.load(output_dir / ckpt_name, map_location=device))
+    # --- Test evaluation (reload best checkpoint) ---
+    model.load_adapted_state_dict(torch.load(output_dir / ckpt_name, map_location=device))
     model.eval()
     test_m = evaluate(model, test_loader, device, args.far_threshold)
 
@@ -251,10 +186,7 @@ def main():
     results = {
         "model_name": args.model_name,
         "dataset_name": args.dataset_name,
-        "prune_layer": args.prune_layer,
-        "keep_ratio": args.keep_ratio,
         "n_classes": n_classes,
-        "use_adapted_backbone": use_adapted_backbone,
         "pre_val_acc": round(pre["acc"], 6),
         "pre_val_f1_macro": round(pre["f1_macro"], 6),
         "best_val_f1_macro": round(best_val_f1, 6),
@@ -265,6 +197,7 @@ def main():
     }
     path = save_results(output_dir / f"results_{run_name}.json", results)
     print(f"Results saved to: {path}")
+    print(f"LoRA-adapted checkpoint: {output_dir / ckpt_name}")
 
     if use_wandb:
         wandb.log({
