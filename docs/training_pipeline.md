@@ -55,7 +55,7 @@ The script prints a classification report on the test split at the end.
 
 The source layer used for feature extraction in Phase 2 should be decided now.
 For a ViT-L (24 blocks), layer 2 is a good starting point.
-For H-optimus (40 blocks), layer 5–8. Run `scripts/ablations/layer_ablation.py` later to find the optimal layer.
+For H-optimus (40 blocks), layer 5–8.
 
 ---
 
@@ -100,7 +100,6 @@ python scripts/train_forecaster.py \
 ```
 
 This trains four forecasters: `forecaster_src02_tgt23.pt`, `forecaster_src04_tgt23.pt`, etc.
-Use `scripts/ablations/layer_ablation.py` to compare them systematically.
 
 ### Monitoring forecaster quality
 
@@ -166,26 +165,6 @@ The CSV contains accuracy, F1-macro, TAR@FAR, ms/img, and GFLOPs for each config
 
 ---
 
-## Layer ablation
-
-To find the best `(prune_layer, target_layer)` pair:
-
-```bash
-python scripts/ablations/layer_ablation.py \
-    --model-name $MODEL \
-    --dataset-name $DATASET \
-    --base-data-folder $DATA \
-    --layers-source 2 4 8 12 \
-    --layers-target 23 22 20 \
-    --keep-ratio 0.1 \
-    --epochs 10 \
-    --wandb-project eaf-ablation
-```
-
-Results are appended to `checkpoints/$DATASET/ablations/ablation_${MODEL}_src*_tgt*.csv`.
-
----
-
 ## Checkpoint naming conventions
 
 ```
@@ -198,6 +177,86 @@ checkpoints/
     ├── {dataset}_{model}_features.h5               ← Phase 2 cache
     └── {model}_pruned/
         └── best_{model}_prune{L}_keep{k}.pt        ← Phase 3
+```
+
+---
+
+## Unsupervised, multi-dataset forecaster (universal EAF)
+
+An alternative to per-dataset Phase 1 + Phase 2: train **one**
+`AttentionForecaster` on a **frozen, pretrained** foundation model (no
+Phase-1 fine-tuning) using the FM's own last-layer CLS->patch attention as
+the target, computed across a **merged corpus of THUNDER datasets**. This
+gives a dataset-independent, "linear-pruning"-style token-importance
+predictor.
+
+### Corpus
+
+16 THUNDER classification datasets (excludes the 4 segmentation-only configs
+`ocelot`, `pannuke`, `segpath_epithelial`, `segpath_lymphocytes`):
+
+```
+bach bracs break_his ccrcc crc esca mhist patch_camelyon
+spider_breast spider_colorectal spider_skin spider_thorax
+tcga_crc_msi tcga_tils tcga_uniform wilds
+```
+
+Download any missing datasets:
+
+```bash
+thunder download <dataset> --make-splits --base-data-folder $DATA
+```
+
+### Step 1 — Build per-dataset attention caches
+
+```bash
+python scripts/build_unsupervised_cache.py \
+    --model-name $MODEL \
+    --base-data-folder $DATA \
+    --layer-source 2
+```
+
+For each dataset, extracts `emb_layer{source}` and `attn_layer{last}` from
+the unmodified pretrained backbone (wrapped as a frozen, uncheckpointed
+`LinearProbingClassifier` -- the head is unused) and writes
+`checkpoints/unsupervised/{dataset}_{model}_attn_features.h5`. Skips datasets
+whose `data_splits/{name}.json` is missing (prints the `thunder download`
+command) and skips datasets whose cache is already valid, so the sweep is
+resumable.
+
+### Step 2 — Train the universal forecaster
+
+```bash
+python scripts/train_forecaster_unsupervised.py \
+    --model-name $MODEL \
+    --base-data-folder $DATA \
+    --layer-source 2 \
+    --epochs 30 \
+    --wandb-project eaf-forecaster
+```
+
+Builds/reuses the same per-dataset caches as Step 1, concatenates them via
+`MultiH5ForecastDataset`, and trains one `AttentionForecaster` with the same
+KL-divergence loss as Phase 2. Reports an aggregate test Spearman `rho`
+(forecaster vs. token-norm baseline) **and** a per-dataset breakdown.
+
+**Output:**
+`checkpoints/unsupervised/{model}_forecaster/forecaster_src{L:02d}_attn{T:02d}_universal.pt`
++ `results_forecaster_src{L:02d}_attn{T:02d}_universal.json`.
+
+### Step 3 — Phase 3 hookup
+
+Point `finetune_pruned.py` at the universal checkpoint via `--forecaster-ckpt`
+to fine-tune any single target dataset with a dataset-independent pruner:
+
+```bash
+python scripts/finetune_pruned.py \
+    --model-name $MODEL \
+    --dataset-name $DATASET \
+    --base-data-folder $DATA \
+    --prune-layer 2 \
+    --keep-ratio 0.1 \
+    --forecaster-ckpt checkpoints/unsupervised/${MODEL}_forecaster/forecaster_src02_attn23_universal.pt
 ```
 
 ---

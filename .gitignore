@@ -1,7 +1,8 @@
 /checkpoints/
+/results/
 /wandb/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-data/
+/data/
 *.sh

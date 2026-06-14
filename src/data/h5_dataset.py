@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 import h5py
@@ -37,3 +38,39 @@ class H5ForecastDataset(Dataset):
         target = torch.from_numpy(grp[f"attn_layer{self.layer_target}"][idx]).float()
         label = int(grp["labels"][idx])
         return emb, target, label
+
+
+class MultiH5ForecastDataset(Dataset):
+    """Concatenation of per-dataset ``H5ForecastDataset`` caches.
+
+    Merges multiple HDF5 attention caches (one per source dataset) into a
+    single dataset for training one universal AttentionForecaster, while
+    keeping track of which sub-dataset each sample came from so per-dataset
+    metrics can be reported.
+
+    Args:
+        cache_paths: ``{dataset_name: h5_path}`` mapping.
+        split:       "train", "val", or "test".
+        layer_source, layer_target: forwarded to each ``H5ForecastDataset``.
+
+    ``__getitem__`` returns ``(emb, target, label, dataset_idx)``, where
+    ``dataset_idx`` indexes into ``self.dataset_names``.
+    """
+
+    def __init__(self, cache_paths, split, layer_source, layer_target):
+        self.dataset_names = list(cache_paths.keys())
+        self.datasets = [
+            H5ForecastDataset(path, split, layer_source, layer_target)
+            for path in cache_paths.values()
+        ]
+        lengths = [len(d) for d in self.datasets]
+        self._offsets = np.cumsum([0] + lengths)
+
+    def __len__(self):
+        return int(self._offsets[-1])
+
+    def __getitem__(self, idx):
+        ds_idx = int(np.searchsorted(self._offsets, idx, side="right") - 1)
+        local_idx = idx - int(self._offsets[ds_idx])
+        emb, target, label = self.datasets[ds_idx][local_idx]
+        return emb, target, label, ds_idx

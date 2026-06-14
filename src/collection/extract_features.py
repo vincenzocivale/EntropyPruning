@@ -43,16 +43,17 @@ def collect_and_save_dataset(model, loaders_dict, device,
             n_total = len(loader.dataset)
             grp = f.create_group(split_name)
             ds_label = grp.create_dataset("labels", shape=(n_total,), dtype='i4')
+            chunk_n = min(128, n_total)
             ds_attn = {
                 lt: grp.create_dataset(
                     f"attn_layer{lt}", shape=(n_total, n_patches),
-                    dtype='f2', chunks=(128, n_patches))
+                    dtype='f2', chunks=(chunk_n, n_patches))
                 for lt in layers_target
             }
             ds_embs = {
                 ls: grp.create_dataset(
                     f"emb_layer{ls}", shape=(n_total, n_patches, embed_dim),
-                    dtype='f2', chunks=(128, n_patches, embed_dim))
+                    dtype='f2', chunks=(chunk_n, n_patches, embed_dim))
                 for ls in layers_source
             }
 
