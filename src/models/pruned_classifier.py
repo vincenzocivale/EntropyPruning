@@ -6,6 +6,92 @@ from peft.tuners.lora import LoraModel
 from .backbone_adapter import ThunderBackboneAdapter
 
 
+class FrozenPrunedLinearProbe(nn.Module):
+    """Frozen ViT encoder + frozen EAF forecaster + trainable linear head.
+
+    Applies EAF-guided token pruning at inference and training time. The
+    backbone and forecaster are never updated; only ``head`` is optimised.
+
+    When ``layers_source`` contains more than one index the patch embeddings
+    from each source block are captured via forward hooks and concatenated
+    along the feature dimension before being fed to the forecaster. Pruning
+    is applied after the highest-indexed source block.
+
+    Args:
+        backbone:      raw timm ViT (will be frozen).
+        adapter:       ThunderBackboneAdapter wrapping ``backbone``.
+        forecaster:    AttentionForecaster (will be frozen). Its input
+                       dimension must equal ``embed_dim * len(layers_source)``.
+        n_classes:     number of output classes.
+        layers_source: block indices to capture (e.g. ``[1, 2, 3, 4, 5]``).
+                       A single int is accepted for convenience.
+        keep_ratio:    fraction of spatial patch tokens to retain (0 < r ≤ 1).
+    """
+
+    def __init__(self, backbone, adapter, forecaster, n_classes,
+                 layers_source, keep_ratio=0.5):
+        super().__init__()
+        if isinstance(layers_source, int):
+            layers_source = [layers_source]
+        self.layers_source = sorted(layers_source)
+        self.prune_layer = max(self.layers_source)
+        self.keep_ratio = keep_ratio
+        self.num_prefix = adapter.num_prefix_tokens
+
+        self.backbone = backbone
+        self.adapter = adapter
+        self.forecaster = forecaster
+        self.head = nn.Linear(adapter.embed_dim, n_classes)
+
+        for p in self.backbone.parameters():
+            p.requires_grad_(False)
+        for p in self.forecaster.parameters():
+            p.requires_grad_(False)
+
+    def train(self, mode=True):
+        """Keep backbone and forecaster in eval mode at all times."""
+        super().train(mode)
+        self.backbone.eval()
+        self.forecaster.eval()
+        return self
+
+    def forward(self, x):
+        captured = {}
+        handles = []
+        num_prefix = self.num_prefix
+
+        for ls in self.layers_source[:-1]:
+            def _cap(module, input, output, _ls=ls):
+                captured[_ls] = output[:, num_prefix:].clone()
+            handles.append(self.backbone.blocks[ls].register_forward_hook(_cap))
+
+        forecaster = self.forecaster
+        keep_ratio = self.keep_ratio
+        layers_source = self.layers_source
+
+        def _prune(module, input, output):
+            prefix = output[:, :num_prefix]
+            patches = output[:, num_prefix:]
+            embs = [captured[ls] for ls in layers_source[:-1]] + [patches]
+            emb_cat = torch.cat(embs, dim=-1)
+            with torch.no_grad():
+                scores = forecaster(emb_cat)
+            k = max(1, int(patches.shape[1] * keep_ratio))
+            idx = scores.topk(k, dim=-1).indices
+            kept = patches.gather(1, idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
+            return torch.cat([prefix, kept], dim=1)
+
+        handles.append(self.backbone.blocks[self.prune_layer].register_forward_hook(_prune))
+
+        try:
+            features = self.backbone.forward_features(x)
+        finally:
+            for h in handles:
+                h.remove()
+
+        return self.head(features[:, 0])
+
+
 class GenericLoRAWithForecasterPruning(nn.Module):
     """
     Forecaster-guided token pruning model for any timm-based Thunder backbone.

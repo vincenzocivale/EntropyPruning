@@ -9,4 +9,4 @@ from .classifier import (
     STRATEGIES,
 )
 from .forecaster import AttentionForecaster
-from .pruned_classifier import GenericLoRAWithForecasterPruning
+from .pruned_classifier import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe
