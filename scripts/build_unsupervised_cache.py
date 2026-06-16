@@ -1,9 +1,9 @@
 """Build per-dataset attention caches for the unsupervised multi-dataset EAF corpus.
 
-For each dataset, extracts ``emb_layer{layer_source}`` (patch embeddings) and
-``attn_layer{layer_target}`` (CLS->patch attention, last block by default) from
-a single FROZEN, pretrained foundation model -- no Phase-1 fine-tuning. The
-resulting per-dataset HDF5 caches are later merged by
+For each dataset, extracts ``emb_layer{L}`` for each L in ``--layers-source``
+(patch embeddings) and ``attn_layer{layer_target}`` (CLS->patch attention, last
+block by default) from a single FROZEN, pretrained foundation model -- no
+Phase-1 fine-tuning. The resulting per-dataset HDF5 caches are later merged by
 ``MultiH5ForecastDataset`` to train one universal AttentionForecaster.
 """
 
@@ -13,6 +13,9 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import argparse
 import sys
 from pathlib import Path
+
+import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -33,7 +36,8 @@ def main():
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--base-data-folder", type=str, required=True)
     parser.add_argument("--datasets", type=str, nargs="+", default=DEFAULT_DATASETS)
-    parser.add_argument("--layer-source", type=int, default=2)
+    parser.add_argument("--layers-source", type=int, nargs="+", default=[2],
+                        help="Block indices to extract patch embeddings from (e.g. 1 2 3 4 5).")
     parser.add_argument("--layer-target", type=int, default=None,
                         help="Defaults to last block (n_blocks-1).")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -52,7 +56,7 @@ def main():
     model, adapter = build_frozen_model(args.model_name, raw_backbone, device)
     layer_target = args.layer_target if args.layer_target is not None else adapter.n_blocks - 1
     print(f"Model: {args.model_name} | embed_dim={adapter.embed_dim} n_blocks={adapter.n_blocks} "
-          f"n_patches={adapter.n_patches} | layer_source={args.layer_source} layer_target={layer_target}")
+          f"n_patches={adapter.n_patches} | layers_source={args.layers_source} layer_target={layer_target}")
 
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path("checkpoints") / "unsupervised"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +72,7 @@ def main():
             continue
 
         save_path = cache_dir / f"{dataset_name}_{args.model_name}_attn_features.h5"
-        if cache_is_valid(save_path, args.layer_source, layer_target, adapter.n_patches, adapter.embed_dim):
+        if cache_is_valid(save_path, args.layers_source, layer_target, adapter.n_patches, adapter.embed_dim):
             print(f"[{dataset_name}] cache already valid: {save_path}")
             skipped.append(dataset_name)
             continue
@@ -76,7 +80,7 @@ def main():
         print(f"[{dataset_name}] building cache -> {save_path}")
         build_attention_cache(
             model, adapter, transform, dataset_name, args.base_data_folder, save_path, device,
-            layer_source=args.layer_source, layer_target=layer_target,
+            layers_source=args.layers_source, layer_target=layer_target,
             batch_size=args.batch_size, num_workers=args.num_workers,
             max_samples_per_split=args.max_samples_per_split,
         )

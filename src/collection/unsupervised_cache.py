@@ -33,9 +33,11 @@ def build_frozen_model(model_name, raw_backbone, device):
     return model, adapter
 
 
-def cache_is_valid(cache_path, layer_source, layer_target, n_patches, embed_dim):
+def cache_is_valid(cache_path, layers_source, layer_target, n_patches, embed_dim):
     """Check whether an existing HDF5 cache has the expected datasets/shapes
     for all three splits, so a multi-dataset sweep can resume safely."""
+    if isinstance(layers_source, int):
+        layers_source = [layers_source]
     cache_path = Path(cache_path)
     if not cache_path.exists():
         return False
@@ -45,13 +47,17 @@ def cache_is_valid(cache_path, layer_source, layer_target, n_patches, embed_dim)
                 if split not in f:
                     return False
                 grp = f[split]
-                emb_key, attn_key = f"emb_layer{layer_source}", f"attn_layer{layer_target}"
-                if "labels" not in grp or emb_key not in grp or attn_key not in grp:
-                    return False
-                if grp[emb_key].shape[1:] != (n_patches, embed_dim):
+                attn_key = f"attn_layer{layer_target}"
+                if "labels" not in grp or attn_key not in grp:
                     return False
                 if grp[attn_key].shape[1:] != (n_patches,):
                     return False
+                for ls in layers_source:
+                    emb_key = f"emb_layer{ls}"
+                    if emb_key not in grp:
+                        return False
+                    if grp[emb_key].shape[1:] != (n_patches, embed_dim):
+                        return False
     except OSError:
         return False
     return True
@@ -68,23 +74,30 @@ def _subset_loader(loader, max_samples):
 
 def build_attention_cache(
     model, adapter, transform, dataset_name, base_data_folder, save_path, device,
-    layer_source=2, layer_target=None,
+    layers_source=None, layer_target=None,
     batch_size=64, num_workers=4, max_samples_per_split=None,
 ):
-    """Extract `emb_layer{layer_source}` and `attn_layer{layer_target}` for one
-    dataset using a shared frozen FM, and save them to ``save_path``.
+    """Extract ``emb_layer{L}`` for each L in ``layers_source`` and
+    ``attn_layer{layer_target}`` for one dataset using a shared frozen FM,
+    and save them to ``save_path``.
 
+    ``layers_source`` is a list of block indices (e.g. ``[1, 2, 3, 4, 5]``);
+    a single int is also accepted for backward compatibility.
     Skips extraction (returns immediately) if a valid cache already exists.
     """
+    if layers_source is None:
+        layers_source = [2]
+    if isinstance(layers_source, int):
+        layers_source = [layers_source]
     if layer_target is None:
         layer_target = adapter.n_blocks - 1
-    assert layer_source < adapter.n_blocks, \
-        f"layer_source {layer_source} >= n_blocks {adapter.n_blocks}"
+    for ls in layers_source:
+        assert ls < adapter.n_blocks, f"layers_source value {ls} >= n_blocks {adapter.n_blocks}"
     assert layer_target < adapter.n_blocks, \
         f"layer_target {layer_target} >= n_blocks {adapter.n_blocks}"
 
     save_path = Path(save_path)
-    if cache_is_valid(save_path, layer_source, layer_target, adapter.n_patches, adapter.embed_dim):
+    if cache_is_valid(save_path, layers_source, layer_target, adapter.n_patches, adapter.embed_dim):
         print(f"  Cache valid, skipping: {save_path}")
         return save_path
 
@@ -98,7 +111,7 @@ def build_attention_cache(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     collect_and_save_dataset(
         model, loaders, device,
-        layers_source=[layer_source],
+        layers_source=layers_source,
         layers_target=[layer_target],
         save_path=save_path,
     )

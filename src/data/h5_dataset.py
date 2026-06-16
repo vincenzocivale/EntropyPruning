@@ -10,12 +10,19 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 class H5ForecastDataset(Dataset):
     """Lazy-loading dataset from HDF5 for forecaster training.
-    Loads embeddings @ layer_source and attention @ layer_target.
+
+    Loads patch embeddings from one or more source layers and CLS attention
+    from ``layer_target``.  When multiple source layers are given the
+    per-layer embeddings are concatenated along the feature dimension, so the
+    returned ``emb`` has shape ``(n_patches, len(layers_source) * embed_dim)``.
+
+    ``layers_source`` accepts either a single ``int`` (backward-compatible) or
+    a ``list[int]``.
     """
-    def __init__(self, h5_path, split, layer_source, layer_target):
+    def __init__(self, h5_path, split, layers_source, layer_target):
         self.h5_path = str(h5_path)
         self.split = split
-        self.layer_source = layer_source
+        self.layers_source = [layers_source] if isinstance(layers_source, int) else list(layers_source)
         self.layer_target = layer_target
         self._file = None
 
@@ -24,7 +31,6 @@ class H5ForecastDataset(Dataset):
 
     def _get_file(self):
         if self._file is None:
-            # Re-open in each worker process
             self._file = h5py.File(self.h5_path, 'r')
         return self._file
 
@@ -34,7 +40,8 @@ class H5ForecastDataset(Dataset):
     def __getitem__(self, idx):
         f = self._get_file()
         grp = f[self.split]
-        emb = torch.from_numpy(grp[f"emb_layer{self.layer_source}"][idx]).float()
+        embs = [torch.from_numpy(grp[f"emb_layer{ls}"][idx]).float() for ls in self.layers_source]
+        emb = torch.cat(embs, dim=-1)
         target = torch.from_numpy(grp[f"attn_layer{self.layer_target}"][idx]).float()
         label = int(grp["labels"][idx])
         return emb, target, label

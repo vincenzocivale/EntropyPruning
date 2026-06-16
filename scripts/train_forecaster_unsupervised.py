@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -92,7 +93,9 @@ def main():
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--base-data-folder", type=str, required=True)
     parser.add_argument("--datasets", type=str, nargs="+", default=DEFAULT_DATASETS)
-    parser.add_argument("--layer-source", type=int, default=2)
+    parser.add_argument("--layers-source", type=int, nargs="+", default=[2],
+                        help="Block indices to extract patch embeddings from (e.g. 1 2 3 4 5). "
+                             "When multiple are given their embeddings are concatenated.")
     parser.add_argument("--layer-target", type=int, default=None,
                         help="Defaults to last block (n_blocks-1).")
     parser.add_argument("--cache-dir", type=str, default=None,
@@ -123,8 +126,10 @@ def main():
     raw_backbone, transform, _ = get_model_from_name(args.model_name, str(device))
     model, adapter = build_frozen_model(args.model_name, raw_backbone, device)
     layer_target = args.layer_target if args.layer_target is not None else adapter.n_blocks - 1
+    forecaster_embed_dim = adapter.embed_dim * len(args.layers_source)
     print(f"embed_dim={adapter.embed_dim} n_blocks={adapter.n_blocks} n_patches={adapter.n_patches} "
-          f"| layer_source={args.layer_source} layer_target={layer_target}")
+          f"| layers_source={args.layers_source} layer_target={layer_target} "
+          f"forecaster_embed_dim={forecaster_embed_dim}")
 
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path("checkpoints") / "unsupervised"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +145,7 @@ def main():
         save_path = cache_dir / f"{dataset_name}_{args.model_name}_attn_features.h5"
         build_attention_cache(
             model, adapter, transform, dataset_name, args.base_data_folder, save_path, device,
-            layer_source=args.layer_source, layer_target=layer_target,
+            layers_source=args.layers_source, layer_target=layer_target,
             batch_size=args.cache_batch_size, num_workers=args.cache_num_workers,
             max_samples_per_split=args.max_samples_per_split,
         )
@@ -152,30 +157,32 @@ def main():
 
     kw = dict(batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True,
               persistent_workers=(args.num_workers > 0))
-    train_ds = MultiH5ForecastDataset(cache_paths, "train", args.layer_source, layer_target)
-    val_ds = MultiH5ForecastDataset(cache_paths, "val", args.layer_source, layer_target)
-    test_ds = MultiH5ForecastDataset(cache_paths, "test", args.layer_source, layer_target)
+    train_ds = MultiH5ForecastDataset(cache_paths, "train", args.layers_source, layer_target)
+    val_ds = MultiH5ForecastDataset(cache_paths, "val", args.layers_source, layer_target)
+    test_ds = MultiH5ForecastDataset(cache_paths, "test", args.layers_source, layer_target)
     train_loader = DataLoader(train_ds, shuffle=True, **kw)
     val_loader = DataLoader(val_ds, shuffle=False, **kw)
     test_loader = DataLoader(test_ds, shuffle=False, **kw)
     print(f"Samples: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
+    print(f"Steps/epoch: {len(train_loader)}")
 
-    run_name = f"{args.model_name}_universal_src{args.layer_source:02d}_attn{layer_target:02d}"
+    src_tag = "src" + "+".join(f"{ls:02d}" for ls in args.layers_source)
+    run_name = f"{args.model_name}_universal_{src_tag}_attn{layer_target:02d}"
     wandb.init(
         project=args.wandb_project, name=run_name, job_type="phase2_unsupervised",
         group=f"unsupervised/{args.model_name}",
         config={"model_name": args.model_name, "embed_dim": adapter.embed_dim,
+                "forecaster_embed_dim": forecaster_embed_dim,
                 "hidden": args.hidden, "n_heads": args.n_heads, "n_layers": args.n_layers,
                 "dropout": args.dropout, "epochs": args.epochs, "lr": args.lr,
-                "weight_decay": args.weight_decay, "layer_source": args.layer_source,
+                "weight_decay": args.weight_decay, "layers_source": args.layers_source,
                 "layer_target": layer_target, "datasets": list(cache_paths.keys())},
-        tags=[args.model_name, f"src{args.layer_source}", f"tgt{layer_target}",
-              "phase2", "unsupervised"],
+        tags=[args.model_name, src_tag, f"tgt{layer_target}", "phase2", "unsupervised"],
         reinit=True,
     )
 
     forecaster = AttentionForecaster(
-        embed_dim=adapter.embed_dim, hidden=args.hidden, n_heads=args.n_heads,
+        embed_dim=forecaster_embed_dim, hidden=args.hidden, n_heads=args.n_heads,
         n_layers=args.n_layers, dropout=args.dropout,
     ).to(device)
     opt = torch.optim.AdamW(forecaster.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -185,7 +192,7 @@ def main():
     forecaster_dir = Path(args.forecaster_dir) if args.forecaster_dir else \
         cache_dir / f"{args.model_name}_forecaster"
     forecaster_dir.mkdir(parents=True, exist_ok=True)
-    save_path = forecaster_dir / f"forecaster_src{args.layer_source:02d}_attn{layer_target:02d}_universal.pt"
+    save_path = forecaster_dir / f"forecaster_{src_tag}_attn{layer_target:02d}_universal.pt"
 
     best_val_kl, best_val_rho = float('inf'), -1.0
     for epoch in range(args.epochs):
@@ -236,7 +243,7 @@ def main():
     results = {
         "model_name": args.model_name,
         "datasets": list(cache_paths.keys()),
-        "layer_source": args.layer_source,
+        "layers_source": args.layers_source,
         "layer_target": layer_target,
         "embed_dim": adapter.embed_dim,
         "best_val_rho": round(best_val_rho, 6),
