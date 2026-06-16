@@ -181,19 +181,20 @@ checkpoints/
 
 ---
 
-## Unsupervised, multi-dataset forecaster (universal EAF)
+## Unsupervised EAF (nessun Phase 1 richiesto)
 
-An alternative to per-dataset Phase 1 + Phase 2: train **one**
-`AttentionForecaster` on a **frozen, pretrained** foundation model (no
-Phase-1 fine-tuning) using the FM's own last-layer CLS->patch attention as
-the target, computed across a **merged corpus of THUNDER datasets**. This
-gives a dataset-independent, "linear-pruning"-style token-importance
-predictor.
+Alternativa alla pipeline supervisionata: addestra `AttentionForecaster` usando come target
+l'attenzione CLS→patch dell'**ultimo blocco** del modello fondazionale **frozen** (nessun
+fine-tuning in Phase 1). Disponibile in due varianti:
 
-### Corpus
+- **Universale** (`train_forecaster_unsupervised.py`): un unico modello addestrato sul corpus
+  concatenato di tutti i dataset disponibili.
+- **Per-dataset** (`train_per_dataset_eaf.py`): un modello separato per ciascun dataset,
+  addestrato indipendentemente (utile come baseline di confronto con il modello universale).
 
-16 THUNDER classification datasets (excludes the 4 segmentation-only configs
-`ocelot`, `pannuke`, `segpath_epithelial`, `segpath_lymphocytes`):
+### Corpus supportato
+
+16 dataset THUNDER di classificazione (esclusi i 4 di sola segmentazione):
 
 ```
 bach bracs break_his ccrcc crc esca mhist patch_camelyon
@@ -201,62 +202,142 @@ spider_breast spider_colorectal spider_skin spider_thorax
 tcga_crc_msi tcga_tils tcga_uniform wilds
 ```
 
-Download any missing datasets:
+Dataset mancanti (no `data_splits/{name}.json`) vengono saltati automaticamente con un avviso.
+Per scaricarli:
 
 ```bash
-thunder download <dataset> --make-splits --base-data-folder $DATA
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
+    thunder download <dataset> --make-splits --base-data-folder /path/to/thunder-tiles/datasets
 ```
 
-### Step 1 — Build per-dataset attention caches
+> **Variabile d'ambiente**: `THUNDER_BASE_DATA_FOLDER` deve puntare alla **root** Thunder
+> (quella che contiene `pretrained_ckpts/`), mentre `--base-data-folder` punta alla
+> sottocartella `datasets/` (che contiene `data_splits/`). Sono percorsi distinti.
+
+### Step 1 — Build delle cache HDF5 per-dataset
 
 ```bash
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
 python scripts/build_unsupervised_cache.py \
     --model-name $MODEL \
-    --base-data-folder $DATA \
-    --layer-source 2
+    --base-data-folder /path/to/thunder-tiles/datasets \
+    --layers-source 2
 ```
 
-For each dataset, extracts `emb_layer{source}` and `attn_layer{last}` from
-the unmodified pretrained backbone (wrapped as a frozen, uncheckpointed
-`LinearProbingClassifier` -- the head is unused) and writes
-`checkpoints/unsupervised/{dataset}_{model}_attn_features.h5`. Skips datasets
-whose `data_splits/{name}.json` is missing (prints the `thunder download`
-command) and skips datasets whose cache is already valid, so the sweep is
-resumable.
+Per ogni dataset estrae `emb_layer{L}` e `attn_layer{last}` dal backbone frozen e scrive
+`checkpoints/unsupervised/{dataset}_{model}_attn_features.h5`.
+Il sweep è **resumabile**: dataset con cache già valida vengono saltati.
 
-### Step 2 — Train the universal forecaster
+Argomenti principali:
+
+| Flag | Default | Note |
+|---|---|---|
+| `--layers-source` | `2` | uno o più layer sorgente (es. `2 4 8`); gli embedding vengono concatenati |
+| `--layer-target` | ultimo blocco | layer di cui predire l'attenzione CLS |
+| `--batch-size` | 64 | |
+| `--cache-dir` | `checkpoints/unsupervised` | |
+
+### Step 2a — Modello universale (un modello su tutti i dataset)
 
 ```bash
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
 python scripts/train_forecaster_unsupervised.py \
     --model-name $MODEL \
-    --base-data-folder $DATA \
-    --layer-source 2 \
+    --base-data-folder /path/to/thunder-tiles/datasets \
+    --layers-source 2 \
     --epochs 30 \
+    --hidden 512 \
+    --forecaster-dir checkpoints/unsupervised/${MODEL}_forecaster_h512 \
     --wandb-project eaf-forecaster
 ```
 
-Builds/reuses the same per-dataset caches as Step 1, concatenates them via
-`MultiH5ForecastDataset`, and trains one `AttentionForecaster` with the same
-KL-divergence loss as Phase 2. Reports an aggregate test Spearman `rho`
-(forecaster vs. token-norm baseline) **and** a per-dataset breakdown.
+Riutilizza le cache di Step 1, concatena i dataset via `MultiH5ForecastDataset`, addestra
+un unico `AttentionForecaster`. La valutazione avviene **solo a fine epoca**. Al termine
+produce un report per-dataset di Spearman `rho`.
 
 **Output:**
-`checkpoints/unsupervised/{model}_forecaster/forecaster_src{L:02d}_attn{T:02d}_universal.pt`
-+ `results_forecaster_src{L:02d}_attn{T:02d}_universal.json`.
+`checkpoints/unsupervised/{model}_forecaster_{tag}/forecaster_src{L:02d}_attn{T:02d}_universal.pt`
 
-### Step 3 — Phase 3 hookup
+Argomenti principali:
 
-Point `finetune_pruned.py` at the universal checkpoint via `--forecaster-ckpt`
-to fine-tune any single target dataset with a dataset-independent pruner:
+| Flag | Default | Note |
+|---|---|---|
+| `--hidden` | 256 | dimensione nascosta; 512 aumenta la capacità del modello |
+| `--n-layers` | 2 | numero di layer transformer |
+| `--epochs` | 30 | |
+| `--forecaster-dir` | `checkpoints/unsupervised/{model}_forecaster` | separare h256 e h512 con percorsi distinti |
+| `--wandb-project` | `attention-forecaster` | |
+
+### Step 2b — Modelli per-dataset (un modello per dataset, baseline di confronto)
+
+```bash
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
+python scripts/train_per_dataset_eaf.py \
+    --cache-dir checkpoints/unsupervised \
+    --checkpoint-dir checkpoints/unsupervised/per_dataset \
+    --epochs 30 \
+    --out-csv logs/per_dataset_eaf_rho.csv
+```
+
+Addestra un modello per ciascun dataset in sequenza, salva il miglior checkpoint e aggiunge
+una riga al CSV non appena ogni dataset completa. Checkpoint organizzati in:
+`checkpoints/unsupervised/per_dataset/{dataset}/forecaster_src{L:02d}_attn{T:02d}.pt`
+
+### Step 3 — Generare lo spider plot per-dataset
+
+```bash
+python scripts/eval_spider_plot.py \
+    --checkpoint checkpoints/unsupervised/${MODEL}_forecaster_h512/forecaster_src02_attn23_universal.pt \
+    --cache-dir checkpoints/unsupervised \
+    --hidden 512 \
+    --out logs/spider_rho_h512.png
+```
+
+Carica il checkpoint, valuta sul test set, genera un grafico radar con il confronto
+forecaster vs. baseline token-norm per ciascun dataset.
+
+### Step 4 — Hookup con Phase 3
 
 ```bash
 python scripts/finetune_pruned.py \
     --model-name $MODEL \
     --dataset-name $DATASET \
-    --base-data-folder $DATA \
+    --base-data-folder /path/to/thunder-tiles/datasets \
     --prune-layer 2 \
     --keep-ratio 0.1 \
-    --forecaster-ckpt checkpoints/unsupervised/${MODEL}_forecaster/forecaster_src02_attn23_universal.pt
+    --forecaster-ckpt checkpoints/unsupervised/${MODEL}_forecaster_h512/forecaster_src02_attn23_universal.pt
+```
+
+### Struttura checkpoint non-supervisionato
+
+```
+checkpoints/unsupervised/
+├── {dataset}_{model}_attn_features.h5          ← cache HDF5 (Step 1)
+├── {model}_forecaster_{tag}/
+│   ├── forecaster_src{L:02d}_attn{T:02d}_universal.pt   ← universale (Step 2a)
+│   └── results_forecaster_src{L:02d}_attn{T:02d}_universal.json
+└── per_dataset/
+    └── {dataset}/
+        └── forecaster_src{L:02d}_attn{T:02d}.pt          ← per-dataset (Step 2b)
+```
+
+### Monitoraggio training (nohup + wandb)
+
+Per esecuzioni SSH-detached, avviare con nohup e disown:
+
+```bash
+nohup bash -c 'THUNDER_BASE_DATA_FOLDER=... conda run --no-capture-output -n eaf_env \
+    python scripts/train_forecaster_unsupervised.py ... \
+    > logs/train_forecaster_unsupervised_uni_h512.log 2>&1' > /dev/null 2>&1 & disown
+```
+
+Monitoraggio live:
+```bash
+# Metriche di validazione (aggiornate solo a fine epoca — stdout bufferizzato)
+tail -f wandb/run-*/files/output.log | grep -E "new best|Ep [0-9]"
+
+# Log completo
+tail -f logs/train_forecaster_unsupervised_uni_h512.log
 ```
 
 ---

@@ -2,13 +2,39 @@
 
 ## Requirements
 
-- Python 3.10
+- Python 3.10+
 - CUDA-capable GPU (recommended: ≥ 24 GB VRAM for ViT-L/g backbones)
 - Git
 
-## Virtual environment
+## Option A — Conda environment (recommended, used on HAL)
 
-The project uses a local `.venv` (not the conda `trident` environment, which is kept for reference via `environment.yml`).
+```bash
+# Create environment
+conda create -n eaf_env python=3.11
+conda activate eaf_env
+
+# Install PyTorch (cu124, compatible with driver ≥ 550)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Install EAF dependencies
+pip install peft transformers timm wandb scikit-learn h5py fvcore tqdm matplotlib
+
+# Install Thunder (from the thunder/ sibling or the installed package)
+pip install thunder-bench   # from PyPI (published as thunder-bench)
+# OR from source:
+pip install -e ../thunder --no-deps
+pip install omegaconf hydra-core kornia wilds ijson sentencepiece
+pip install opencv-python plotly pydantic typer einops einops_exts
+```
+
+Run scripts without activating the environment:
+```bash
+conda run --no-capture-output -n eaf_env python scripts/train_forecaster_unsupervised.py ...
+```
+
+## Option B — Virtual environment (.venv)
+
+The project also supports a local `.venv` (used on Nanopore-PC).
 
 ```bash
 # Create venv (first time only)
@@ -18,14 +44,14 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 
 # Install EAF dependencies
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install peft transformers timm wandb scikit-learn h5py fvcore tqdm
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install peft transformers timm wandb scikit-learn h5py fvcore tqdm matplotlib
 ```
 
-## Installing Thunder
+> **Nota CUDA (Nanopore-PC)**: il driver NVIDIA (535.x) supporta CUDA ≤ 12.2.
+> Usare `--index-url https://download.pytorch.org/whl/cu121`. Non installare `torch>=2.6.0`.
 
-Thunder must be installed as an editable package from the sibling directory.
-Use `--no-deps` to avoid downgrading `timm` (the venv pins `timm==1.0.20`; Thunder's constraint `<=1.0.20` is satisfied).
+## Installing Thunder
 
 ```bash
 pip install -e ../thunder --no-deps

@@ -1,4 +1,105 @@
-# Path critici — Nanopore-PC
+# Path critici per macchina
+
+---
+
+# HAL (hostname `hal`) — server GPU principale
+
+Macchina con GPU dedicata su cui girano i training correnti (branch `unsupervised-pruning`).
+
+## Ambiente Python
+
+| Voce | Path |
+|---|---|
+| Conda base | `/data2/home/vcivale/miniconda3/` |
+| Environment | `eaf_env` |
+| Attivazione | `conda activate eaf_env` |
+| Esecuzione senza attivazione | `conda run --no-capture-output -n eaf_env python ...` |
+| PyTorch installato | `2.5.1+cu124` |
+
+## Sorgente codice
+
+| Voce | Path |
+|---|---|
+| Progetto EAF (questo repo) | `/data2/home/vcivale/projects/imaging/EAF/` |
+| Branch attivo | `unsupervised-pruning` |
+| Thunder (installato in eaf_env) | incluso in `eaf_env` (non un repo separato) |
+
+## Dati Thunder (`THUNDER_BASE_DATA_FOLDER`)
+
+Impostare **sempre** questa variabile prima di ogni run:
+```bash
+export THUNDER_BASE_DATA_FOLDER=/data2/home/vcivale/projects/imaging/data/thunder-tiles
+```
+
+> **Importante**: `THUNDER_BASE_DATA_FOLDER` punta alla root (contenente `pretrained_ckpts/`),
+> mentre `--base-data-folder` punta alla sottocartella `datasets/` (contenente `data_splits/`).
+> Sono **due percorsi diversi** — non confonderli.
+
+| Voce | Path |
+|---|---|
+| `THUNDER_BASE_DATA_FOLDER` (root) | `/data2/home/vcivale/projects/imaging/data/thunder-tiles/` |
+| `--base-data-folder` (da passare agli script) | `/data2/home/vcivale/projects/imaging/data/thunder-tiles/datasets/` |
+| Pesi modelli pre-addestrati | `/data2/home/vcivale/projects/imaging/data/thunder-tiles/pretrained_ckpts/` |
+| Split JSON | `...datasets/data_splits/{dataset}.json` |
+| Checkpoint EAF supervisato | `/data2/home/vcivale/projects/imaging/data/thunder-tiles/checkpoints/` |
+| Cache e checkpoint non-supervisionato | `/data2/home/vcivale/projects/imaging/EAF/checkpoints/unsupervised/` |
+| Log training | `/data2/home/vcivale/projects/imaging/EAF/logs/` |
+
+## Dataset scaricati (15 su 16 — manca `mhist`)
+
+```
+bach  bracs  break_his  ccrcc  crc  esca  patch_camelyon
+spider_breast  spider_colorectal  spider_skin  spider_thorax
+tcga_crc_msi  tcga_tils  tcga_uniform  wilds
+```
+
+> **Nota SPIDER**: i dataset `spider_*` usano solo la sottocartella `center_crop/` (patch pre-elaborate).
+> Le cartelle raw `SPIDER-{organ}/` (download HuggingFace originale, ~241 GB ciascuna) sono state
+> **eliminate** — non servono alla pipeline.
+
+## Checkpoint non-supervisionato (stato attuale)
+
+| File | Descrizione |
+|---|---|
+| `checkpoints/unsupervised/*_uni_attn_features.h5` | Cache HDF5 per tutti i 15 dataset |
+| `checkpoints/unsupervised/uni_forecaster_h512/forecaster_src02_attn23_universal.pt` | Modello universale h512 (in training) |
+| `checkpoints/unsupervised/per_dataset/{ds}/forecaster_src02_attn23.pt` | Modelli per-dataset (in training) |
+
+## Comandi di avvio rapido (HAL)
+
+```bash
+cd /data2/home/vcivale/projects/imaging/EAF
+export THUNDER_BASE_DATA_FOLDER=/data2/home/vcivale/projects/imaging/data/thunder-tiles
+BASE_DATA=/data2/home/vcivale/projects/imaging/data/thunder-tiles/datasets
+
+# Pipeline supervisionata (Fase 1 → 2 → 3) su un dataset
+bash scripts/run_thunder_crc_tests.sh  # vedi run_experiment.md per la versione parametrica
+
+# Pipeline non-supervisionata universale (build cache + train)
+THUNDER_BASE_DATA_FOLDER=$THUNDER_BASE_DATA_FOLDER \
+conda run --no-capture-output -n eaf_env python scripts/build_unsupervised_cache.py \
+    --model-name uni --base-data-folder $BASE_DATA
+
+THUNDER_BASE_DATA_FOLDER=$THUNDER_BASE_DATA_FOLDER \
+conda run --no-capture-output -n eaf_env python scripts/train_forecaster_unsupervised.py \
+    --model-name uni --base-data-folder $BASE_DATA --layers-source 2 --epochs 30 \
+    --forecaster-dir checkpoints/unsupervised/uni_forecaster_h512 \
+    --hidden 512 --wandb-project eaf-forecaster
+
+# Pipeline non-supervisionata per-dataset (tutti i 15 in sequenza)
+THUNDER_BASE_DATA_FOLDER=$THUNDER_BASE_DATA_FOLDER \
+conda run --no-capture-output -n eaf_env python scripts/train_per_dataset_eaf.py
+```
+
+## Disco
+
+| Mount | Note |
+|---|---|
+| `/data2/` | Disco principale dati e checkpoint; usare sempre questo per download grandi |
+
+---
+
+# Nanopore-PC (hostname `Nanopore-PC`)
 
 Questa macchina si chiama **Nanopore-PC** (hostname `Nanopore-PC`).
 Documento qui dove risiedono i file critici per la pipeline EAF.
