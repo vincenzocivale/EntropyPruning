@@ -192,7 +192,7 @@ def main():
     forecaster_dir = Path(args.forecaster_dir) if args.forecaster_dir else \
         cache_dir / f"{args.model_name}_forecaster"
     forecaster_dir.mkdir(parents=True, exist_ok=True)
-    save_path = forecaster_dir / f"forecaster_{src_tag}_attn{layer_target:02d}_universal.pt"
+    save_path = forecaster_dir / f"forecaster_{args.model_name}_{src_tag}_attn{layer_target:02d}_universal.pt"
 
     best_val_kl, best_val_rho = float('inf'), -1.0
     for epoch in range(args.epochs):
