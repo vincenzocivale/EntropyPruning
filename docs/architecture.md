@@ -105,22 +105,28 @@ scores (B, N)               — per-patch importance
 Trained with KL divergence against ground-truth CLS attention.
 Evaluated with Spearman rank correlation (higher = better ranking of important patches).
 
-### Pruned model (`src/models/pruned_classifier.py`)
+### Pruned models (`src/models/pruned_classifier.py`)
 
-`GenericLoRAWithForecasterPruning` always uses LoRA for the backbone (independent of Phase 1 strategy).
+Two classes share the same pruning mechanism:
 
-Pruning forward pass at `prune_layer`:
+**`GenericLoRAWithForecasterPruning`** — Phase 3. Wraps the backbone with LoRA, keeps LoRA + head trainable, freezes the forecaster. Uses a straight-through estimator during training for differentiable pruning.
+
+**`FrozenPrunedLinearProbe`** — Linear probing experiment. Both backbone and forecaster are fully frozen at all times; only a single `nn.Linear` head is optimised. Overrides `train()` to keep backbone and forecaster in eval mode even during head training. Supports multi-layer source: hooks capture patch embeddings at each source block and concatenate them along the feature dimension before feeding to the forecaster.
+
+Pruning forward pass (shared logic):
 ```
 x (B, N_total, D)
     │
 prefix = x[:, :num_prefix_tokens]   — CLS + register tokens, always kept
 patches = x[:, num_prefix_tokens:]  — spatial patches, subject to pruning
     │
-scores = forecaster(patches)        — (B, N_patches), no grad
+[if multi-layer: concatenate captured embeddings from earlier source blocks]
     │
-keep top-k patches (straight-through during training, hard mask at inference)
+scores = forecaster(patches / concat_embs)   — (B, N_patches), no grad
     │
-cat([prefix, kept_patches], dim=1)  — shortened sequence
+keep top-k patches
+    │
+cat([prefix, kept_patches], dim=1)  — shortened sequence for remaining blocks
 ```
 
 ---
@@ -140,6 +146,7 @@ Thunder
 Phase 1:  build_classifier(strategy, backbone, adapter, n_classes)
 Phase 2:  collect_and_save_dataset → HDF5 cache → H5ForecastDataset → forecaster training
 Phase 3:  GenericLoRAWithForecasterPruning(backbone, adapter, forecaster, prune_layer, keep_ratio)
+Exp:      FrozenPrunedLinearProbe(backbone, adapter, forecaster, n_classes, layers_source, keep_ratio)
 ```
 
 ---
@@ -155,6 +162,10 @@ Phase 3:  GenericLoRAWithForecasterPruning(backbone, adapter, forecaster, prune_
 
 Where `P = adapter.n_patches`, `D = adapter.embed_dim`.
 Register tokens are excluded — only spatial patch tokens are stored.
+
+A single cache file can hold embeddings from multiple source layers (e.g. `emb_layer1` through `emb_layer5`), allowing the same HDF5 to be reused for experiments with different `layers_source` configurations without re-extraction.
+
+When `H5ForecastDataset` is given a list of source layers, it concatenates their embeddings along the feature dimension: the returned `emb` tensor has shape `(P, len(layers_source) × D)`. The forecaster must be initialised with the matching `embed_dim`.
 
 ---
 

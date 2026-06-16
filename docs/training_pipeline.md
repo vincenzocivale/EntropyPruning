@@ -161,7 +161,7 @@ python scripts/evaluate_pruned_checkpoints.py \
     --output-csv results/eval_${MODEL}_${DATASET}.csv
 ```
 
-The CSV contains accuracy, F1-macro, TAR@FAR, ms/img, and GFLOPs for each configuration.
+The CSV contains accuracy, F1-macro, AUROC, TAR@FAR, ms/img, and GFLOPs for each configuration.
 
 ---
 
@@ -256,7 +256,9 @@ un unico `AttentionForecaster`. La valutazione avviene **solo a fine epoca**. Al
 produce un report per-dataset di Spearman `rho`.
 
 **Output:**
-`checkpoints/unsupervised/{model}_forecaster_{tag}/forecaster_src{L:02d}_attn{T:02d}_universal.pt`
+`checkpoints/unsupervised/{model}_forecaster/forecaster_{model}_{src_tag}_attn{T:02d}_universal.pt`
+
+dove `src_tag = "src" + "+".join(f"{ls:02d}" for ls in layers_source)`, es. `src02` oppure `src01+02+03+04+05`.
 
 Argomenti principali:
 
@@ -283,7 +285,61 @@ Addestra un modello per ciascun dataset in sequenza, salva il miglior checkpoint
 una riga al CSV non appena ogni dataset completa. Checkpoint organizzati in:
 `checkpoints/unsupervised/per_dataset/{dataset}/forecaster_src{L:02d}_attn{T:02d}.pt`
 
-### Step 3 — Generare lo spider plot per-dataset
+### Step 3 — Linear probe con EAF Pruning (esperimento)
+
+Valuta quanto è utile il pruning EAF anche senza fine-tuning del backbone: backbone e forecaster
+sono completamente frozen, si addestra solo una testa lineare (`nn.Linear`).
+
+```bash
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
+python scripts/linear_probe_pruned_eaf.py \
+    --model-name $MODEL \
+    --base-data-folder /path/to/thunder-tiles/datasets \
+    --cache-dir checkpoints/unsupervised \
+    --eaf-types per_dataset universal \
+    --layers-source 2 \
+    --keep-ratios 0.1 0.25 0.5 0.75 \
+    --epochs 20 \
+    --results-dir results/linear_probe_pruned
+```
+
+Lo script:
+1. Scopre automaticamente i dataset dai file `.h5` in `--cache-dir` (o usa `--datasets`).
+2. Per `eaf_type=universal` carica il forecaster una sola volta per tutti i dataset.
+3. Per `eaf_type=per_dataset` carica il forecaster specifico per ogni dataset.
+4. È **resumabile**: righe già presenti nel CSV vengono saltate.
+
+**Output:** `results/linear_probe_pruned/{model_name}.csv`
+
+Colonne del CSV:
+
+| Colonna | Descrizione |
+|---|---|
+| `model_name` | Encoder usato |
+| `dataset` | Nome del dataset |
+| `eaf_type` | `per_dataset` o `universal` |
+| `layers_source` | Blocchi sorgente (es. `2` o `1+2+3+4+5`) |
+| `prune_layer` | Blocco dove viene applicato il pruning |
+| `keep_ratio` | Frazione di patch mantenute |
+| `n_classes`, `n_train`, `n_val`, `n_test` | Statistiche del dataset |
+| `best_epoch`, `best_val_acc`, `best_val_f1` | Risultato migliore su validation |
+| `test_acc` | Accuracy sul test |
+| `test_f1_macro` | F1 macro sul test |
+| `test_auroc` | AUROC (OvR macro) sul test |
+| `test_tar_at_far` | TAR@FAR (default FAR=1e-4) |
+
+Argomenti principali:
+
+| Flag | Default | Note |
+|---|---|---|
+| `--eaf-types` | `per_dataset universal` | uno o entrambi |
+| `--layers-source` | `2` | deve coincidere con le cache disponibili |
+| `--keep-ratios` | `0.25 0.5 0.75` | sweep multipli in un solo run |
+| `--per-dataset-dir` | `{cache-dir}/per_dataset` | dove cercare i forecaster per-dataset |
+| `--forecaster-n-heads` | `4` | deve coincidere con il training del forecaster |
+| `--epochs` | `20` | epoche per la testa lineare |
+
+### Step 4 — Generare lo spider plot per-dataset
 
 ```bash
 python scripts/eval_spider_plot.py \
@@ -296,7 +352,7 @@ python scripts/eval_spider_plot.py \
 Carica il checkpoint, valuta sul test set, genera un grafico radar con il confronto
 forecaster vs. baseline token-norm per ciascun dataset.
 
-### Step 4 — Hookup con Phase 3
+### Step 5 — Hookup con Phase 3
 
 ```bash
 python scripts/finetune_pruned.py \
@@ -312,13 +368,16 @@ python scripts/finetune_pruned.py \
 
 ```
 checkpoints/unsupervised/
-├── {dataset}_{model}_attn_features.h5          ← cache HDF5 (Step 1)
-├── {model}_forecaster_{tag}/
-│   ├── forecaster_src{L:02d}_attn{T:02d}_universal.pt   ← universale (Step 2a)
-│   └── results_forecaster_src{L:02d}_attn{T:02d}_universal.json
+├── {dataset}_{model}_attn_features.h5                          ← cache HDF5 (Step 1)
+├── {model}_forecaster/
+│   ├── forecaster_{model}_{src_tag}_attn{T:02d}_universal.pt   ← universale (Step 2a)
+│   └── results_forecaster_{model}_{src_tag}_attn{T:02d}_universal.json
 └── per_dataset/
     └── {dataset}/
-        └── forecaster_src{L:02d}_attn{T:02d}.pt          ← per-dataset (Step 2b)
+        └── forecaster_src{L:02d}_attn{T:02d}.pt                ← per-dataset (Step 2b)
+
+results/linear_probe_pruned/
+└── {model_name}.csv                                            ← Step 3
 ```
 
 ### Monitoraggio training (nohup + wandb)

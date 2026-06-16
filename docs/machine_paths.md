@@ -62,8 +62,18 @@ tcga_crc_msi  tcga_tils  tcga_uniform  wilds
 | File | Descrizione |
 |---|---|
 | `checkpoints/unsupervised/*_uni_attn_features.h5` | Cache HDF5 per tutti i 15 dataset |
-| `checkpoints/unsupervised/uni_forecaster_h512/forecaster_src02_attn23_universal.pt` | Modello universale h512 (in training) |
-| `checkpoints/unsupervised/per_dataset/{ds}/forecaster_src02_attn23.pt` | Modelli per-dataset (in training) |
+| `checkpoints/unsupervised/uni_forecaster/forecaster_uni_src02_attn23_universal.pt` | Modello universale (naming post-refactor: include model_name nel filename) |
+| `checkpoints/unsupervised/per_dataset/{ds}/forecaster_src02_attn23.pt` | Modelli per-dataset |
+
+> **Nota naming**: a partire dal commit `3e20bc1` il filename del forecaster universale include il nome
+> dell'encoder: `forecaster_{model}_{src_tag}_attn{T:02d}_universal.pt`.
+> I checkpoint precedenti al refactor usavano `forecaster_src{L:02d}_attn{T:02d}_universal.pt`.
+
+## Risultati esperimenti
+
+| File | Descrizione |
+|---|---|
+| `results/linear_probe_pruned/{model_name}.csv` | Metriche linear probe con EAF pruning (acc, F1, AUROC, TAR@FAR) |
 
 ## Comandi di avvio rapido (HAL)
 

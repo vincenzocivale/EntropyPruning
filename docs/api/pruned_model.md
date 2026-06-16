@@ -1,7 +1,7 @@
-# API — GenericLoRAWithForecasterPruning
+# API — Pruned Models
 
 **Module:** `src/models/pruned_classifier.py`
-**Import:** `from src.models import GenericLoRAWithForecasterPruning`
+**Import:** `from src.models import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe`
 
 ---
 
@@ -115,3 +115,84 @@ bench = benchmark_model(model, test_loader, device, label="pruned keep=10%")
 print(bench["ms_per_img"])   # inference latency
 print(bench["gflops"])       # FLOPs via fvcore
 ```
+
+---
+
+## `FrozenPrunedLinearProbe`
+
+```python
+FrozenPrunedLinearProbe(
+    backbone: nn.Module,
+    adapter: ThunderBackboneAdapter,
+    forecaster: nn.Module,
+    n_classes: int,
+    layers_source: int | list[int],
+    keep_ratio: float = 0.5,
+)
+```
+
+Linear probing model for the unsupervised EAF experiment. The backbone and forecaster are frozen at construction and kept in eval mode at all times (via `train()` override). Only the `head` (a single `nn.Linear`) receives gradients.
+
+Supports **multi-layer source**: when `layers_source` contains more than one index, patch embeddings from each source block are captured via forward hooks and concatenated along the feature dimension before being fed to the forecaster. Pruning is applied after `max(layers_source)`.
+
+### Parameters
+
+| Argument | Description |
+|---|---|
+| `backbone` | Raw timm ViT (will be frozen). |
+| `adapter` | `ThunderBackboneAdapter` for the same backbone. |
+| `forecaster` | `AttentionForecaster` (will be frozen). Its `embed_dim` must equal `adapter.embed_dim × len(layers_source)`. |
+| `n_classes` | Number of output classes. |
+| `layers_source` | Block index (int) or list of block indices whose patch embeddings are fed to the forecaster. |
+| `keep_ratio` | Fraction of spatial patch tokens to retain. |
+
+### Attributes
+
+| Attribute | Description |
+|---|---|
+| `head` | `nn.Linear(embed_dim, n_classes)` — the only trainable component. |
+| `prune_layer` | `max(layers_source)` — block where pruning is applied. |
+| `layers_source` | Sorted list of source block indices. |
+
+### Example
+
+```python
+from src.models import AttentionForecaster, FrozenPrunedLinearProbe, ThunderBackboneAdapter
+from src.collection.unsupervised_cache import build_frozen_model
+from src.evaluation.metrics import evaluate
+from thunder.models.pretrained_models import get_model_from_name
+import torch
+
+raw_backbone, transform, _ = get_model_from_name("uni", "cuda")
+_, adapter = build_frozen_model("uni", raw_backbone, device)
+
+# Load a universal forecaster (embed_dim inferred from weights)
+state = torch.load("forecaster_uni_src02_attn23_universal.pt", map_location=device)
+forecaster = AttentionForecaster(
+    embed_dim=state["input_proj.weight"].shape[1],
+    hidden=state["input_proj.weight"].shape[0],
+).to(device)
+forecaster.load_state_dict(state)
+
+model = FrozenPrunedLinearProbe(
+    backbone=raw_backbone,
+    adapter=adapter,
+    forecaster=forecaster,
+    n_classes=9,
+    layers_source=[2],
+    keep_ratio=0.5,
+).to(device)
+
+# Train only the head
+opt = torch.optim.AdamW(model.head.parameters(), lr=1e-3)
+# ... training loop ...
+
+metrics = evaluate(model, test_loader, device)
+# metrics: {acc, f1_macro, auroc, tar_at_far, threshold}
+```
+
+### Notes
+
+- `evaluate()` in `src/evaluation/metrics.py` now returns `auroc` in addition to `acc`, `f1_macro`, `tar_at_far`, and `threshold`. Binary classification uses the positive-class score; multiclass uses OvR macro.
+- The backbone is shared across model instances when running multiple experiments in sequence — `to(device)` moves it only once.
+- `train()` sets only `head.training = True`; backbone and forecaster remain in eval mode regardless.
