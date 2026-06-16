@@ -72,6 +72,7 @@ CSV_FIELDS = [
     "best_val_f1",
     "test_acc",
     "test_f1_macro",
+    "test_auroc",
     "test_tar_at_far",
 ]
 
@@ -348,6 +349,7 @@ def main():
                         "best_val_f1":     round(best_f1, 6),
                         "test_acc":        round(float(test_m["acc"]), 6),
                         "test_f1_macro":   round(float(test_m["f1_macro"]), 6),
+                        "test_auroc":      round(float(test_m["auroc"]), 6),
                         "test_tar_at_far": round(float(test_m["tar_at_far"]), 6),
                     }
                     writer.writerow(row)
@@ -355,6 +357,7 @@ def main():
                     print(
                         f"  → test_acc={row['test_acc']:.4f}  "
                         f"test_f1={row['test_f1_macro']:.4f}  "
+                        f"auroc={row['test_auroc']:.4f}  "
                         f"tar@far={row['test_tar_at_far']:.4f}"
                     )
 
