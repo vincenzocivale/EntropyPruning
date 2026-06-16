@@ -74,6 +74,8 @@ tcga_crc_msi  tcga_tils  tcga_uniform  wilds
 | File | Descrizione |
 |---|---|
 | `results/linear_probe_pruned/{model_name}.csv` | Metriche linear probe con EAF pruning (acc, F1, AUROC, TAR@FAR) |
+| `results/ablations/per_vs_universal/{model_name}/rho_spider.png` | Spider plot confronto ρ per-dataset vs universale |
+| `results/ablations/per_vs_universal/{model_name}/rho_table.csv` | Tabella numerica ρ per dataset |
 
 ## Comandi di avvio rapido (HAL)
 

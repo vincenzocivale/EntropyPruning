@@ -339,18 +339,36 @@ Argomenti principali:
 | `--forecaster-n-heads` | `4` | deve coincidere con il training del forecaster |
 | `--epochs` | `20` | epoche per la testa lineare |
 
-### Step 4 — Generare lo spider plot per-dataset
+### Step 4 — Confronto per-dataset vs universale (spider plot + CSV)
+
+Script `compare_eaf_spider.py`: confronta la Spearman ρ dei forecaster per-dataset (re-valutati dai checkpoint) con quella del modello universale (letta dal JSON prodotto in Step 2a). Produce due file in `results/ablations/per_vs_universal/{model_name}/`.
 
 ```bash
-python scripts/eval_spider_plot.py \
-    --checkpoint checkpoints/unsupervised/${MODEL}_forecaster_h512/forecaster_src02_attn23_universal.pt \
+# Solo universale (da JSON)
+python scripts/compare_eaf_spider.py \
+    --model-name $MODEL \
     --cache-dir checkpoints/unsupervised \
-    --hidden 512 \
-    --out logs/spider_rho_h512.png
+    --universal-json \
+        checkpoints/unsupervised/${MODEL}_forecaster/results_forecaster_${MODEL}_src02_attn23_universal.json
+
+# Confronto completo (re-valuta per-dataset + carica universale)
+python scripts/compare_eaf_spider.py \
+    --model-name $MODEL \
+    --cache-dir checkpoints/unsupervised \
+    --per-dataset-dir checkpoints/unsupervised/per_dataset \
+    --layers-source 2 \
+    --layer-target 23 \
+    --universal-json \
+        checkpoints/unsupervised/${MODEL}_forecaster/results_forecaster_${MODEL}_src02_attn23_universal.json \
+        checkpoints/unsupervised/${MODEL}_forecaster_h512/results_forecaster_${MODEL}_src02_attn23_universal.json
 ```
 
-Carica il checkpoint, valuta sul test set, genera un grafico radar con il confronto
-forecaster vs. baseline token-norm per ciascun dataset.
+**Output** (`results/ablations/per_vs_universal/{model_name}/`):
+
+| File | Descrizione |
+|---|---|
+| `rho_spider.png` | Grafico radar — tutte le serie + baseline token-norm |
+| `rho_table.csv` | Tabella numerica dataset × serie (+ avg) |
 
 ### Step 5 — Hookup con Phase 3
 
@@ -378,6 +396,11 @@ checkpoints/unsupervised/
 
 results/linear_probe_pruned/
 └── {model_name}.csv                                            ← Step 3
+
+results/ablations/per_vs_universal/
+└── {model_name}/
+    ├── rho_spider.png                                          ← Step 4
+    └── rho_table.csv                                          ← Step 4
 ```
 
 ### Monitoraggio training (nohup + wandb)
