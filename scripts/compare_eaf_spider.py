@@ -303,8 +303,8 @@ def main():
                          "Default: union of all sources, sorted.")
     ap.add_argument("--no-baseline",        action="store_true",
                     help="Omit the token-norm baseline line.")
-    ap.add_argument("--out-dir",            type=str, default="results/ablations",
-                    help="Output directory (default: results/ablations).")
+    ap.add_argument("--out-dir",            type=str, default="results/ablations/per_vs_universal",
+                    help="Output directory (default: results/ablations/per_vs_universal).")
     args = ap.parse_args()
 
     if not args.universal_json and not args.per_dataset_dir:
