@@ -169,7 +169,7 @@ class GenericLoRAWithForecasterPruning(nn.Module):
 
             def block_fwd(x):
                 x = orig_fwd(x)
-                B, _, D = x.shape
+                _, _, D = x.shape
                 prefix = x[:, :num_prefix, :]       # CLS + register tokens — always kept
                 patches = x[:, num_prefix:, :]      # spatial patches — subject to pruning
                 N = patches.shape[1]
@@ -178,22 +178,20 @@ class GenericLoRAWithForecasterPruning(nn.Module):
                     scores = forecaster(patches)     # (B, N)
 
                 k_keep = max(1, int(N * keep_ratio))
-                topk_vals = scores.topk(k_keep, dim=-1).values
+                topk_vals, topk_idx = scores.topk(k_keep, dim=-1)
                 threshold = topk_vals[:, -1:]
                 soft_mask = torch.sigmoid((scores - threshold) / 0.05)
                 hard_mask = (scores >= threshold).float()
                 st_mask = hard_mask - soft_mask.detach() + soft_mask
 
-                topk_idx = scores.topk(k_keep, dim=-1).indices
                 if training:
                     masked_patches = patches * st_mask.unsqueeze(-1)
-                    kept = torch.stack(
-                        [masked_patches[b][topk_idx[b]] for b in range(B)]
-                    )
+                    kept_source = masked_patches
                 else:
-                    kept = torch.stack(
-                        [patches[b][topk_idx[b]] for b in range(B)]
-                    )
+                    kept_source = patches
+                kept = kept_source.gather(
+                    1, topk_idx.unsqueeze(-1).expand(-1, -1, D)
+                )
                 return torch.cat([prefix, kept], dim=1)
             return block_fwd
         return make_hook

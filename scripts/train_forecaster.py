@@ -53,7 +53,12 @@ def train_forecaster(layer_source, layer_target, cfg, device):
         reinit=True,
     )
 
-    kw = dict(batch_size=128, num_workers=4, pin_memory=True, persistent_workers=True)
+    kw = dict(
+        batch_size=cfg["batch_size"],
+        num_workers=cfg["num_workers"],
+        pin_memory=True,
+        persistent_workers=(cfg["num_workers"] > 0),
+    )
     train_loader = DataLoader(
         H5ForecastDataset(cfg["dataset_cache"], "train", layer_source, layer_target),
         shuffle=True, **kw)
@@ -211,6 +216,7 @@ def main():
         hidden=args.hidden, n_heads=args.n_heads, n_layers=args.n_layers,
         dropout=args.dropout, epochs=args.epochs, lr=args.lr,
         weight_decay=args.weight_decay, wandb_project=args.wandb_project,
+        batch_size=args.batch_size, num_workers=args.num_workers,
     )
     cfg["forecaster_dir"].mkdir(parents=True, exist_ok=True)
 
