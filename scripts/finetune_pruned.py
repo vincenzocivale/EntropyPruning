@@ -61,8 +61,9 @@ def main():
     adapter = ThunderBackboneAdapter(raw_backbone)
     print(f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
           f"n_patches={adapter.n_patches}  prefix={adapter.num_prefix_tokens}")
-    assert args.prune_layer < adapter.n_blocks, \
-        f"--prune-layer {args.prune_layer} >= n_blocks {adapter.n_blocks}"
+    assert args.prune_layer < adapter.n_blocks - 1, \
+        (f"--prune-layer {args.prune_layer} leaves no blocks to LoRA-adapt "
+         f"(n_blocks={adapter.n_blocks})")
 
     base_ckpt = Path("checkpoints")
     classifier_ckpt = args.classifier_ckpt or str(

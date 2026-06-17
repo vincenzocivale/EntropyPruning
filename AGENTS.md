@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository implements EAF, an entropy-guided token pruning pipeline for Vision Transformer histopathology classifiers. Core Python modules live in `src/`: `models/` contains classifier, backbone adapter, forecaster, and pruned model code; `evaluation/` contains metrics and benchmark utilities; `collection/` contains feature extraction and cache-building helpers; `data/` contains dataset loaders. Entry-point scripts are in `scripts/`, including `train_classifier.py`, `train_forecaster.py`, `train_forecaster_unsupervised.py`, `build_unsupervised_cache.py`, and `finetune_pruned.py`. Documentation is in `docs/`. Generated artifacts (results, checkpoints, wandb logs) are gitignored and should not be committed.
+This repository implements EAF, an entropy-guided token pruning pipeline for Vision Transformer histopathology classifiers. Core Python modules live in `src/`: `models/` contains classifier, backbone adapter, forecaster, and pruned model code; `evaluation/` contains metrics and benchmark utilities; `collection/` contains feature extraction and cache-building helpers; `data/` contains dataset loaders. Entry-point scripts are in `scripts/`, including `train_classifier.py`, `train_forecaster.py`, `train_forecaster_unsupervised.py`, `build_unsupervised_cache.py`, `finetune_pruned.py`, and `distill_pruned.py`. Documentation is in `docs/`. Generated artifacts (results, checkpoints, wandb logs) are gitignored and should not be committed.
 
 ## Build, Test, and Development Commands
 

@@ -1,7 +1,7 @@
 # API — Pruned Models
 
 **Module:** `src/models/pruned_classifier.py`
-**Import:** `from src.models import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe`
+**Import:** `from src.models import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe, DistilledPrunedBackbone`
 
 ---
 
@@ -24,7 +24,7 @@ GenericLoRAWithForecasterPruning(
 Phase 3 model. Wraps a backbone with LoRA adapters and a frozen `AttentionForecaster`.
 At each forward pass, patches are scored and pruned at `prune_layer` before the remaining blocks are executed.
 
-The backbone always uses LoRA regardless of the Phase 1 adaptation strategy.
+LoRA adapters are scoped to blocks **strictly after** `prune_layer` only (`post_prune_lora_targets`). Blocks at or before `prune_layer` see the same tokens regardless of pruning, so they have nothing to compensate for and stay frozen at their pretrained weights — only the blocks that actually run on the shortened sequence are fine-tuned. This holds regardless of the Phase 1 adaptation strategy.
 
 ### Parameters
 
@@ -34,7 +34,7 @@ The backbone always uses LoRA regardless of the Phase 1 adaptation strategy.
 | `adapter` | `ThunderBackboneAdapter` for the same backbone. |
 | `n_classes` | Number of output classes. |
 | `forecaster` | Trained `AttentionForecaster`, **must be frozen before passing in**. |
-| `prune_layer` | Block index where pruning is applied (0-indexed). Must be < `adapter.n_blocks`. |
+| `prune_layer` | Block index where pruning is applied (0-indexed). Must leave at least one block to adapt: `prune_layer < adapter.n_blocks - 1`. |
 | `keep_ratio` | Fraction of spatial patch tokens to keep (e.g. `0.1` = 10%). |
 | `lora_r`, `lora_alpha` | LoRA hyperparameters. |
 | `dropout` | Classification head dropout. |
@@ -77,7 +77,7 @@ missing, unexpected = model.load_state_dict(
 )
 ```
 
-If Phase 1 used `LoRAClassifier`, backbone key names match exactly.
+If Phase 1 used `LoRAClassifier`, head weights and the LoRA weights of blocks **after** `prune_layer` match exactly and are loaded. Phase 1 LoRA weights for blocks at or before `prune_layer` have no corresponding parameter here (those blocks carry no adapter — see scoping above) and show up in `unexpected`; this is expected, not a bug. Those blocks start from the plain pretrained weights instead.
 If Phase 1 used a non-LoRA strategy, the backbone starts from pretrained weights (Phase 1 head weights are loaded).
 
 ### Example
@@ -196,3 +196,76 @@ metrics = evaluate(model, test_loader, device)
 - `evaluate()` in `src/evaluation/metrics.py` now returns `auroc` in addition to `acc`, `f1_macro`, `tar_at_far`, and `threshold`. Binary classification uses the positive-class score; multiclass uses OvR macro.
 - The backbone is shared across model instances when running multiple experiments in sequence — `to(device)` moves it only once.
 - `train()` sets only `head.training = True`; backbone and forecaster remain in eval mode regardless.
+- `scripts/linear_probe_pruned_eaf.py` accepts `--backbone-ckpt` to load a non-default `state_dict` onto the backbone before probing (e.g. the output of `DistilledPrunedBackbone` distillation below) and `--backbone-tag` to label the resulting CSV rows.
+
+---
+
+## `DistilledPrunedBackbone`
+
+```python
+DistilledPrunedBackbone(
+    backbone: nn.Module,
+    adapter: ThunderBackboneAdapter,
+    forecaster: nn.Module,
+    prune_layer: int,
+    keep_ratio: float,
+    lora_r: int = 8,
+    lora_alpha: int = 32,
+)
+```
+
+Phase 3, "Approach 3": dataset-agnostic counterpart to `GenericLoRAWithForecasterPruning`. There is no classification head — `forward(x)` returns the CLS embedding `(B, embed_dim)`. Training target is the CLS token the same backbone would have produced *without* pruning (a frozen "teacher" copy of the backbone), not class labels, so one run produces a single backbone usable across every downstream dataset.
+
+Only blocks strictly after `prune_layer` carry LoRA adapters (see `post_prune_lora_targets`). Blocks at or before `prune_layer` are identical between teacher and student — they see the same tokens either way — so they stay completely frozen, unlike `GenericLoRAWithForecasterPruning` which LoRA-adapts the whole backbone.
+
+### Parameters
+
+| Argument | Description |
+|---|---|
+| `backbone` | Raw timm model from `get_model_from_name`. Will host LoRA adapters on post-`prune_layer` blocks only. |
+| `adapter` | `ThunderBackboneAdapter` for the same backbone. |
+| `forecaster` | Trained `AttentionForecaster` (typically the **universal** one — see `train_forecaster_unsupervised.py` — since the whole point is to stay dataset-agnostic). Frozen internally. |
+| `prune_layer` | Block index where pruning is applied (0-indexed). Must leave at least one block to distill (`prune_layer < adapter.n_blocks - 1`). |
+| `keep_ratio` | Fraction of spatial patch tokens to keep. |
+| `lora_r`, `lora_alpha` | LoRA hyperparameters for the post-prune blocks. |
+
+### `post_prune_lora_targets(adapter, prune_layer) -> list[str]`
+
+Returns the exact peft `target_modules` list (`"blocks.{i}.attn.qkv"`, `.attn.proj`, `.mlp.fc1`, `.mlp.fc2"` for `i > prune_layer`). Exact names rather than bare suffixes (`"qkv"`, `"proj"`, ...) so block 5 is never matched by a rule meant for block 15 — peft checks list membership/exact-suffix match, see `peft.tuners.tuners_utils.check_target_module_exists`.
+
+### Training recipe (`scripts/distill_pruned.py`)
+
+```python
+teacher = raw_backbone_copy.to(device).eval()  # untouched, frozen
+for p in teacher.parameters():
+    p.requires_grad_(False)
+
+student = DistilledPrunedBackbone(
+    backbone=another_raw_backbone_copy, adapter=adapter, forecaster=forecaster,
+    prune_layer=2, keep_ratio=0.1,
+).to(device)
+
+teacher_cls = teacher.forward_features(imgs)[:, 0]          # no_grad
+student_cls = student(imgs)
+loss = mse_weight * F.mse_loss(student_cls, teacher_cls) \
+     + cosine_weight * (1 - F.cosine_similarity(student_cls, teacher_cls, dim=-1).mean())
+```
+
+Teacher and student must be **separate backbone instances** (two calls to `get_model_from_name`) — reusing one object for both would mean the "teacher" forward also runs through the (partially trained) LoRA weights once the first optimizer step lands, defeating the purpose of a fixed target.
+
+### Merging after training
+
+```python
+merged_backbone = student.backbone.merge_and_unload()   # call ONCE, after training ends
+torch.save(merged_backbone.state_dict(), "distilled_uni_prune2_keep10.pt")
+```
+
+`merge_and_unload()` folds the LoRA deltas into the base weights **in place** and removes the adapter layers, turning `student.backbone` back into a plain timm module — do not call it mid-training, it permanently destroys the LoRA structure. The resulting `state_dict()` has the exact same keys as a vanilla `get_model_from_name` backbone, so it can be loaded directly:
+
+```python
+raw_backbone, transform, _ = get_model_from_name("uni", "cuda")
+raw_backbone.load_state_dict(torch.load("distilled_uni_prune2_keep10.pt"))
+# then build FrozenPrunedLinearProbe(backbone=raw_backbone, ...) as usual
+```
+
+or via `scripts/linear_probe_pruned_eaf.py --backbone-ckpt distilled_uni_prune2_keep10.pt --backbone-tag distilled` for the per-dataset linear-probing sweep.

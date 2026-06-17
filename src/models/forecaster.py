@@ -50,3 +50,25 @@ class AttentionForecaster(nn.Module):
             torch.cat([x_norm, cls_exp], dim=-1)
         ).squeeze(-1)
         return scores
+
+
+def load_forecaster(ckpt_path, device, n_heads=4):
+    """Load a frozen AttentionForecaster, inferring embed_dim/hidden/n_layers from weights."""
+    state = torch.load(ckpt_path, map_location=device, weights_only=True)
+    embed_dim = state["input_proj.weight"].shape[1]
+    hidden = state["input_proj.weight"].shape[0]
+    n_layers = sum(
+        1 for k in state if k.startswith("self_attn.") and k.endswith(".norm1.weight")
+    )
+    forecaster = AttentionForecaster(
+        embed_dim=embed_dim,
+        hidden=hidden,
+        n_heads=n_heads,
+        n_layers=max(n_layers, 1),
+        dropout=0.0,
+    ).to(device)
+    forecaster.load_state_dict(state)
+    forecaster.eval()
+    for p in forecaster.parameters():
+        p.requires_grad_(False)
+    return forecaster

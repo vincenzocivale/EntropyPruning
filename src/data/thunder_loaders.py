@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 
 import thunder
 from thunder.utils.data import PatchDataset, get_data
@@ -122,3 +122,46 @@ def build_thunder_loaders(
         class_names,
         n_classes,
     )
+
+
+def build_multi_dataset_loaders(
+    dataset_names,
+    base_data_folder: str,
+    transform,
+    batch_size: int = 64,
+    num_workers: int = 4,
+):
+    """Merge train/val splits across several Thunder datasets into two combined
+    (image, label) DataLoaders, for dataset-agnostic training (e.g. CLS-token
+    distillation) where labels are unused and per-dataset class balance doesn't
+    matter. Datasets missing a data split are skipped with a warning.
+
+    Returns:
+        (train_loader, val_loader, used_dataset_names)
+    """
+    train_parts, val_parts, used = [], [], []
+    for name in dataset_names:
+        split_path = Path(base_data_folder) / "data_splits" / f"{name}.json"
+        if not split_path.exists():
+            print(f"[{name}] SKIP: missing data split {split_path}")
+            continue
+        train_loader, val_loader, _, _, _ = build_thunder_loaders(
+            name, base_data_folder, transform, batch_size, num_workers,
+            drop_last_train=False,
+        )
+        train_parts.append(train_loader.dataset)
+        val_parts.append(val_loader.dataset)
+        used.append(name)
+
+    if not train_parts:
+        raise RuntimeError(
+            "No dataset splits available -- check --base-data-folder / --datasets."
+        )
+
+    kw = dict(
+        batch_size=batch_size, num_workers=num_workers, pin_memory=True,
+        persistent_workers=(num_workers > 0),
+    )
+    train_loader = DataLoader(ConcatDataset(train_parts), shuffle=True, drop_last=True, **kw)
+    val_loader = DataLoader(ConcatDataset(val_parts), shuffle=False, **kw)
+    return train_loader, val_loader, used

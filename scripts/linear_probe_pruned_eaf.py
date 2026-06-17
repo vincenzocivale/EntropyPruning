@@ -51,7 +51,7 @@ from thunder.models.pretrained_models import get_model_from_name
 from src.collection.unsupervised_cache import build_frozen_model
 from src.data.thunder_loaders import build_thunder_loaders
 from src.evaluation.metrics import evaluate
-from src.models import AttentionForecaster, FrozenPrunedLinearProbe
+from src.models import FrozenPrunedLinearProbe, load_forecaster
 from src.utils import get_device, set_seed
 
 
@@ -60,6 +60,7 @@ CSV_FIELDS = [
     "model_name",
     "dataset",
     "eaf_type",
+    "backbone_variant",
     "layers_source",
     "prune_layer",
     "keep_ratio",
@@ -80,28 +81,6 @@ CSV_FIELDS = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _load_forecaster(ckpt_path, device, n_heads=4):
-    """Load an AttentionForecaster, inferring embed_dim / hidden / n_layers from weights."""
-    state = torch.load(ckpt_path, map_location=device, weights_only=True)
-    embed_dim = state["input_proj.weight"].shape[1]
-    hidden = state["input_proj.weight"].shape[0]
-    n_layers = sum(
-        1 for k in state if k.startswith("self_attn.") and k.endswith(".norm1.weight")
-    )
-    forecaster = AttentionForecaster(
-        embed_dim=embed_dim,
-        hidden=hidden,
-        n_heads=n_heads,
-        n_layers=max(n_layers, 1),
-        dropout=0.0,
-    ).to(device)
-    forecaster.load_state_dict(state)
-    forecaster.eval()
-    for p in forecaster.parameters():
-        p.requires_grad_(False)
-    return forecaster
-
 
 def _forecaster_path(eaf_type, dataset, model_name, layers_source,
                      layer_target, cache_dir, per_dataset_dir):
@@ -131,6 +110,7 @@ def _load_done(csv_path):
                 row["model_name"],
                 row["dataset"],
                 row["eaf_type"],
+                row.get("backbone_variant", "pretrained"),
                 row["layers_source"],
                 int(row["prune_layer"]),
                 float(row["keep_ratio"]),
@@ -182,6 +162,13 @@ def main():
     ap.add_argument("--per-dataset-dir",    type=str,   default=None,
                     help="Directory of per-dataset forecaster checkpoints. "
                          "Default: {cache-dir}/per_dataset")
+    ap.add_argument("--backbone-ckpt",      type=str,   default=None,
+                    help="Optional state_dict to load onto the backbone before probing "
+                         "(e.g. a CLS-distilled backbone from scripts/distill_pruned.py). "
+                         "Default: unmodified pretrained weights.")
+    ap.add_argument("--backbone-tag",       type=str,   default="pretrained",
+                    help="Label for the backbone variant, written to the CSV "
+                         "(e.g. 'distilled'). Purely informational.")
     ap.add_argument("--datasets",           type=str,   nargs="+", default=None,
                     help="Dataset names. Default: auto-discovered from HDF5 cache files.")
     ap.add_argument("--eaf-types",          type=str,   nargs="+",
@@ -211,6 +198,10 @@ def main():
 
     # Load backbone once; share it across all experiments
     raw_backbone, transform, _ = get_model_from_name(args.model_name, str(device))
+    if args.backbone_ckpt:
+        state = torch.load(args.backbone_ckpt, map_location=device, weights_only=True)
+        raw_backbone.load_state_dict(state)
+        print(f"Backbone weights loaded from: {args.backbone_ckpt} (tag={args.backbone_tag})")
     _, adapter = build_frozen_model(args.model_name, raw_backbone, device)
     layer_target = args.layer_target if args.layer_target is not None else adapter.n_blocks - 1
     per_dataset_dir = (
@@ -268,13 +259,13 @@ def main():
                 if not ckpt.exists():
                     print(f"\n[universal] Checkpoint not found: {ckpt} — skipping")
                     continue
-                universal_forecaster = _load_forecaster(ckpt, device, args.forecaster_n_heads)
+                universal_forecaster = load_forecaster(ckpt, device, args.forecaster_n_heads)
                 print(f"\n[universal] Forecaster loaded: {ckpt}")
 
             for dataset_name in dataset_names:
                 for keep_ratio in args.keep_ratios:
                     tag = f"[{eaf_type}|{dataset_name}|keep={keep_ratio}]"
-                    key = (args.model_name, dataset_name, eaf_type,
+                    key = (args.model_name, dataset_name, eaf_type, args.backbone_tag,
                            src_label, prune_layer, keep_ratio)
 
                     if key in done:
@@ -290,7 +281,7 @@ def main():
                         if not ckpt.exists():
                             print(f"{tag} Forecaster not found: {ckpt} — skip")
                             continue
-                        forecaster = _load_forecaster(ckpt, device, args.forecaster_n_heads)
+                        forecaster = load_forecaster(ckpt, device, args.forecaster_n_heads)
                     else:
                         forecaster = universal_forecaster
 
@@ -337,6 +328,7 @@ def main():
                         "model_name":      args.model_name,
                         "dataset":         dataset_name,
                         "eaf_type":        eaf_type,
+                        "backbone_variant": args.backbone_tag,
                         "layers_source":   src_label,
                         "prune_layer":     prune_layer,
                         "keep_ratio":      keep_ratio,

@@ -100,19 +100,28 @@ class GenericLoRAWithForecasterPruning(nn.Module):
     frozen AttentionForecaster, keeps the top keep_ratio fraction, then runs the
     remaining blocks. Prefix tokens (CLS + register tokens) are always preserved.
 
+    LoRA adapters are scoped to blocks strictly after ``prune_layer`` only (see
+    ``post_prune_lora_targets``): blocks at or before ``prune_layer`` see the same
+    tokens whether or not pruning happens, so they have nothing to compensate for
+    and stay frozen at their pretrained weights. Only the blocks that actually
+    run on the shortened sequence are fine-tuned.
+
     Args:
         backbone:    raw timm model from thunder's get_model_from_name.
         adapter:     ThunderBackboneAdapter for backbone.
         n_classes:   number of output classes.
         forecaster:  trained AttentionForecaster (must be frozen before passing in).
-        prune_layer: block index where pruning is applied (0-indexed).
+        prune_layer: block index where pruning is applied (0-indexed). Must leave
+                     at least one block to adapt (``prune_layer < adapter.n_blocks - 1``).
         keep_ratio:  fraction of spatial patch tokens to keep (e.g. 0.1 = top 10%).
         lora_r, lora_alpha: LoRA parameters.
         dropout:     classifier head dropout.
 
     Note:
         Load Phase 1 checkpoint with strict=False — peft key prefix differs from
-        a plain model, and the forecaster keys are new.
+        a plain model, the forecaster keys are new, and any Phase 1 LoRA weights
+        for blocks at or before ``prune_layer`` are now unused (reported as
+        "unexpected" keys) since those blocks no longer carry adapters here.
     """
 
     def __init__(self, backbone: nn.Module, adapter: ThunderBackboneAdapter,
@@ -123,7 +132,7 @@ class GenericLoRAWithForecasterPruning(nn.Module):
         self.adapter = adapter
         lora_config = LoraConfig(
             r=lora_r, lora_alpha=lora_alpha,
-            target_modules=["qkv", "proj", "fc1", "fc2"],
+            target_modules=post_prune_lora_targets(adapter, prune_layer),
             lora_dropout=0.1, bias="none",
         )
         self.backbone = LoraModel(backbone, lora_config, adapter_name="default")
@@ -188,3 +197,94 @@ class GenericLoRAWithForecasterPruning(nn.Module):
                 return torch.cat([prefix, kept], dim=1)
             return block_fwd
         return make_hook
+
+
+def post_prune_lora_targets(adapter: ThunderBackboneAdapter, prune_layer: int) -> list:
+    """Exact module names (qkv/proj/fc1/fc2) for blocks strictly after ``prune_layer``.
+
+    Blocks at or before ``prune_layer`` see the same tokens in the teacher and the
+    pruned student, so they carry no LoRA adapters and stay byte-identical to the
+    frozen pretrained backbone. peft matches list entries by exact name or dotted
+    suffix (see ``peft.tuners.tuners_utils.check_target_module_exists``); passing
+    full names like ``"blocks.5.attn.qkv"`` makes the match exact, so block 5 is
+    never confused with block 15.
+    """
+    targets = []
+    for i in range(prune_layer + 1, adapter.n_blocks):
+        targets += [
+            f"blocks.{i}.attn.qkv", f"blocks.{i}.attn.proj",
+            f"blocks.{i}.mlp.fc1", f"blocks.{i}.mlp.fc2",
+        ]
+    return targets
+
+
+class DistilledPrunedBackbone(nn.Module):
+    """Backbone distilled to reproduce its own unpruned CLS token after EAF pruning.
+
+    Dataset-agnostic counterpart to ``GenericLoRAWithForecasterPruning``: instead of
+    a classification head trained with cross-entropy on one dataset, this model has
+    no head at all and is trained with a CLS-token regression loss against a frozen,
+    unpruned copy of the same backbone (the "teacher"). Only blocks strictly after
+    ``prune_layer`` carry LoRA adapters — see ``post_prune_lora_targets`` — since
+    earlier blocks never see the effect of pruning and have nothing to compensate for.
+
+    After training, call ``model.backbone.merge_and_unload()`` once (outside the
+    training loop — it mutates the backbone in place and removes the LoRA layers)
+    to obtain a plain timm backbone whose weights can be dropped into
+    ``FrozenPrunedLinearProbe`` for dataset-specific linear probing.
+
+    Args:
+        backbone:    raw timm model from get_model_from_name (hosts LoRA adapters
+                     on post-prune_layer blocks only).
+        adapter:     ThunderBackboneAdapter for backbone.
+        forecaster:  trained AttentionForecaster (will be frozen).
+        prune_layer: block index where pruning is applied (0-indexed).
+        keep_ratio:  fraction of spatial patch tokens to keep (e.g. 0.1 = top 10%).
+        lora_r, lora_alpha: LoRA hyperparameters.
+    """
+
+    def __init__(self, backbone: nn.Module, adapter: ThunderBackboneAdapter,
+                 forecaster: nn.Module, prune_layer: int, keep_ratio: float,
+                 lora_r: int = 8, lora_alpha: int = 32):
+        super().__init__()
+        self.adapter = adapter
+        self.prune_layer = prune_layer
+        self.keep_ratio = keep_ratio
+        self.num_prefix = adapter.num_prefix_tokens
+
+        lora_config = LoraConfig(
+            r=lora_r, lora_alpha=lora_alpha,
+            target_modules=post_prune_lora_targets(adapter, prune_layer),
+            lora_dropout=0.1, bias="none",
+        )
+        self.backbone = LoraModel(backbone, lora_config, adapter_name="default")
+        self.forecaster = forecaster
+        for p in self.forecaster.parameters():
+            p.requires_grad_(False)
+
+    @property
+    def raw_backbone(self) -> nn.Module:
+        """The underlying timm VisionTransformer (unwrapped from peft)."""
+        return self.backbone.model
+
+    def forward(self, x):
+        num_prefix = self.num_prefix
+        forecaster = self.forecaster
+        keep_ratio = self.keep_ratio
+
+        def _prune(module, input, output):
+            prefix = output[:, :num_prefix]
+            patches = output[:, num_prefix:]
+            with torch.no_grad():
+                scores = forecaster(patches)
+            k = max(1, int(patches.shape[1] * keep_ratio))
+            idx = scores.topk(k, dim=-1).indices
+            kept = patches.gather(1, idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
+            return torch.cat([prefix, kept], dim=1)
+
+        handle = self.raw_backbone.blocks[self.prune_layer].register_forward_hook(_prune)
+        try:
+            features = self.raw_backbone.forward_features(x)
+        finally:
+            handle.remove()
+        return features[:, 0]

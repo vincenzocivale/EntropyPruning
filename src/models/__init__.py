@@ -8,5 +8,10 @@ from .classifier import (
     build_classifier,
     STRATEGIES,
 )
-from .forecaster import AttentionForecaster
-from .pruned_classifier import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe
+from .forecaster import AttentionForecaster, load_forecaster
+from .pruned_classifier import (
+    GenericLoRAWithForecasterPruning,
+    FrozenPrunedLinearProbe,
+    DistilledPrunedBackbone,
+    post_prune_lora_targets,
+)

@@ -338,6 +338,66 @@ Argomenti principali:
 | `--per-dataset-dir` | `{cache-dir}/per_dataset` | dove cercare i forecaster per-dataset |
 | `--forecaster-n-heads` | `4` | deve coincidere con il training del forecaster |
 | `--epochs` | `20` | epoche per la testa lineare |
+| `--backbone-ckpt` | nessuno | se impostato, carica questo `state_dict` sul backbone prima del probing (es. output di Step 3b) |
+| `--backbone-tag` | `pretrained` | etichetta scritta nella colonna `backbone_variant` del CSV, per distinguere righe `pretrained` da righe `distilled` nello stesso file |
+
+### Step 3b — Distillazione CLS token (Approccio 3, dataset-agnostic)
+
+Terza alternativa di Phase 3, oltre a `finetune_pruned.py` (Approccio 2 — LoRA + cross-entropy su un solo
+dataset) e a Step 3 (Approccio 1 — backbone interamente frozen). Qui i blocchi **dopo** `--prune-layer`
+ricevono adapter LoRA addestrati con una loss di **distillazione**: devono riprodurre il CLS token che lo
+stesso backbone, frozen e senza pruning, avrebbe prodotto (`DistilledPrunedBackbone` in
+`src/models/pruned_classifier.py`). Nessuna label, nessuna testa di classificazione: il corpus è l'unione
+di più dataset THUNDER, esattamente come nello Step 1/2a.
+
+```bash
+THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
+python scripts/distill_pruned.py \
+    --model-name $MODEL \
+    --base-data-folder /path/to/thunder-tiles/datasets \
+    --cache-dir checkpoints/unsupervised \
+    --prune-layer 2 \
+    --keep-ratio 0.1 \
+    --epochs 10 \
+    --wandb-project eaf-distill
+```
+
+Per default usa il forecaster **universale** già addestrato allo Step 2a (stesso `--prune-layer` come
+source layer). Al termine produce un singolo backbone distillato, riutilizzabile su qualunque dataset.
+
+**Output:** `checkpoints/unsupervised/{model}_distilled/distilled_{model}_prune{L}_keep{k}.pt`
+
+Argomenti principali:
+
+| Flag | Default | Note |
+|---|---|---|
+| `--datasets` | i 16 dataset THUNDER | corpus di immagini per la distillazione (nessuna label usata) |
+| `--forecaster-ckpt` | forecaster universale in `--cache-dir` | deve corrispondere a `--prune-layer` come source layer |
+| `--mse-weight`, `--cosine-weight` | `1.0`, `1.0` | pesi della loss combinata MSE + (1 − cosine similarity) sul CLS token |
+| `--lora-r`, `--lora-alpha` | `8`, `32` | LoRA solo sui blocchi dopo `--prune-layer` |
+| `--epochs` | `10` | |
+
+Poi, per il linear probe per-dataset sul backbone distillato (chiudendo il loop dell'Approccio 3):
+
+```bash
+python scripts/linear_probe_pruned_eaf.py \
+    --model-name $MODEL \
+    --base-data-folder /path/to/thunder-tiles/datasets \
+    --cache-dir checkpoints/unsupervised \
+    --eaf-types universal \
+    --keep-ratios 0.1 \
+    --backbone-ckpt checkpoints/unsupervised/${MODEL}_distilled/distilled_${MODEL}_prune2_keep10.pt \
+    --backbone-tag distilled
+```
+
+Le righe finiscono nello stesso `results/linear_probe_pruned/{model}.csv` dello Step 3, con
+`backbone_variant=distilled` invece di `pretrained` — permette il confronto diretto Approccio 1 vs
+Approccio 3 a parità di forecaster/keep_ratio/dataset.
+
+> **Nota costo:** lo script tiene in memoria due copie del backbone (teacher frozen + student con LoRA),
+> e ricalcola i blocchi pre-pruning due volte per batch (una per il teacher, una per lo student) — nessuna
+> cache HDF5 è usata qui poiché i blocchi dopo `--prune-layer` cambiano ad ogni step. Per backbone molto
+> grandi, riduci `--batch-size`.
 
 ### Step 4 — Confronto per-dataset vs universale (spider plot + CSV)
 
@@ -390,12 +450,16 @@ checkpoints/unsupervised/
 ├── {model}_forecaster/
 │   ├── forecaster_{model}_{src_tag}_attn{T:02d}_universal.pt   ← universale (Step 2a)
 │   └── results_forecaster_{model}_{src_tag}_attn{T:02d}_universal.json
-└── per_dataset/
-    └── {dataset}/
-        └── forecaster_src{L:02d}_attn{T:02d}.pt                ← per-dataset (Step 2b)
+├── per_dataset/
+│   └── {dataset}/
+│       └── forecaster_src{L:02d}_attn{T:02d}.pt                ← per-dataset (Step 2b)
+└── {model}_distilled/
+    ├── distilled_{model}_prune{L}_keep{k}.pt                   ← backbone distillato (Step 3b)
+    ├── lora_{model}_prune{L}_keep{k}.pt                        ← checkpoint LoRA intermedio (resume)
+    └── results_{model}_prune{L}_keep{k}.json
 
 results/linear_probe_pruned/
-└── {model_name}.csv                                            ← Step 3
+└── {model_name}.csv                                  ← Step 3 (pretrained) + Step 3b (distilled)
 
 results/ablations/per_vs_universal/
 └── {model_name}/

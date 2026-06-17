@@ -21,7 +21,7 @@ The pipeline is built on top of [THUNDER](https://github.com/MICS-Lab/thunder) f
 | [Classifiers](api/classifiers.md) | `BaseClassifier`, all strategy classes, `build_classifier` |
 | [BackboneAdapter](api/backbone_adapter.md) | `ThunderBackboneAdapter` |
 | [Forecaster](api/forecaster.md) | `AttentionForecaster` |
-| [Pruned Models](api/pruned_model.md) | `GenericLoRAWithForecasterPruning`, `FrozenPrunedLinearProbe` |
+| [Pruned Models](api/pruned_model.md) | `GenericLoRAWithForecasterPruning`, `FrozenPrunedLinearProbe`, `DistilledPrunedBackbone` |
 
 ---
 

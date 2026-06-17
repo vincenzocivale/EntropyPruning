@@ -122,7 +122,7 @@ Ablating adaptation cost?    →  run all four and compare
 | Phase 1 strategy | Phase 2 feature cache | Phase 3 pruning |
 |---|---|---|
 | `linear_probing` | Features = pretrained features (backbone not modified) | Phase 3 starts LoRA on pretrained weights + loads Phase 1 head |
-| `lora` | Features from LoRA-adapted backbone | Phase 3 loads LoRA weights correctly (matching key names) |
+| `lora` | Features from LoRA-adapted backbone | Phase 3 LoRA only covers blocks after `prune_layer` — matching Phase 1 LoRA keys for those blocks load correctly; Phase 1 LoRA keys for blocks at/before `prune_layer` are unused (`unexpected`), those blocks fall back to pretrained weights |
 | `full` | Features from fully fine-tuned backbone | Phase 3 applies new LoRA on top; Phase 1 weights loaded as base |
 | `bitfit` | Features from bias-adapted backbone | Phase 3 applies LoRA; Phase 1 backbone keys load partially |
 

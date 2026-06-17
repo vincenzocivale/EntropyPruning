@@ -52,6 +52,22 @@ Reload Phase 1 weights into `GenericLoRAWithForecasterPruning`, freeze the forec
 **Script:** `scripts/finetune_pruned.py`
 **Output:** `checkpoints/{dataset}/{model}_pruned/best_{model}_prune{L}_keep{k}.pt`
 
+### Phase 3 — alternative recipes
+
+Three ways to adapt a backbone to its own pruning, increasing in cost and decreasing in
+per-dataset specialisation:
+
+| Approach | Class | Trainable | Supervision | Dataset-agnostic? |
+|---|---|---|---|---|
+| 1. Frozen + linear probe | `FrozenPrunedLinearProbe` | head only | labels | no — head per dataset |
+| 2. LoRA fine-tune | `GenericLoRAWithForecasterPruning` | post-`prune_layer` blocks (LoRA) + head | labels | no — full run per dataset |
+| 3. CLS distillation | `DistilledPrunedBackbone` | post-`prune_layer` blocks (LoRA) | teacher CLS token, no labels | **yes** — one backbone, then linear-probe (Approach 1) per dataset |
+
+Approaches 2 and 3 LoRA-adapt the same scope (blocks strictly after `prune_layer` — see `post_prune_lora_targets`); they differ only in supervision (per-dataset labels vs. dataset-agnostic teacher-CLS regression) and in whether a head is trained jointly.
+
+**Script (3):** `scripts/distill_pruned.py`
+**Output:** `checkpoints/unsupervised/{model}_distilled/distilled_{model}_prune{L}_keep{k}.pt`
+
 ---
 
 ## Class hierarchy
@@ -107,11 +123,13 @@ Evaluated with Spearman rank correlation (higher = better ranking of important p
 
 ### Pruned models (`src/models/pruned_classifier.py`)
 
-Two classes share the same pruning mechanism:
+Three classes share the same pruning mechanism:
 
-**`GenericLoRAWithForecasterPruning`** — Phase 3. Wraps the backbone with LoRA, keeps LoRA + head trainable, freezes the forecaster. Uses a straight-through estimator during training for differentiable pruning.
+**`GenericLoRAWithForecasterPruning`** — Phase 3, Approach 2. Wraps only the blocks after `prune_layer` with LoRA (`post_prune_lora_targets`), keeps LoRA + head trainable, freezes the forecaster and the pre-`prune_layer` blocks. Uses a straight-through estimator during training for differentiable pruning.
 
-**`FrozenPrunedLinearProbe`** — Linear probing experiment. Both backbone and forecaster are fully frozen at all times; only a single `nn.Linear` head is optimised. Overrides `train()` to keep backbone and forecaster in eval mode even during head training. Supports multi-layer source: hooks capture patch embeddings at each source block and concatenate them along the feature dimension before feeding to the forecaster.
+**`FrozenPrunedLinearProbe`** — Phase 3, Approach 1 (linear probing experiment). Both backbone and forecaster are fully frozen at all times; only a single `nn.Linear` head is optimised. Overrides `train()` to keep backbone and forecaster in eval mode even during head training. Supports multi-layer source: hooks capture patch embeddings at each source block and concatenate them along the feature dimension before feeding to the forecaster.
+
+**`DistilledPrunedBackbone`** — Phase 3, Approach 3. No head — `forward(x)` returns the CLS embedding. LoRA adapters are scoped to blocks strictly after `prune_layer` only (`post_prune_lora_targets`), since earlier blocks are identical between the pruned student and the frozen, unpruned teacher. Trained with an MSE + cosine-distance loss against the teacher's CLS token; no labels involved, so the same checkpoint transfers across datasets. Call `model.backbone.merge_and_unload()` once after training to fold LoRA into the base weights, producing a plain backbone consumable by `FrozenPrunedLinearProbe`.
 
 Pruning forward pass (shared logic):
 ```
@@ -145,8 +163,10 @@ Thunder
 
 Phase 1:  build_classifier(strategy, backbone, adapter, n_classes)
 Phase 2:  collect_and_save_dataset → HDF5 cache → H5ForecastDataset → forecaster training
-Phase 3:  GenericLoRAWithForecasterPruning(backbone, adapter, forecaster, prune_layer, keep_ratio)
-Exp:      FrozenPrunedLinearProbe(backbone, adapter, forecaster, n_classes, layers_source, keep_ratio)
+Phase 3 (1): FrozenPrunedLinearProbe(backbone, adapter, forecaster, n_classes, layers_source, keep_ratio)
+Phase 3 (2): GenericLoRAWithForecasterPruning(backbone, adapter, forecaster, prune_layer, keep_ratio)
+Phase 3 (3): DistilledPrunedBackbone(backbone, adapter, forecaster, prune_layer, keep_ratio)
+             → merge_and_unload() → FrozenPrunedLinearProbe(...) per dataset
 ```
 
 ---
