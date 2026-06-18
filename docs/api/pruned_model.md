@@ -1,7 +1,7 @@
 # API — Pruned Models
 
-**Module:** `src/models/pruned_classifier.py`
-**Import:** `from src.models import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe, DistilledPrunedBackbone`
+**Modules:** `src/models/pruned_classifier.py`, `src/models/cropr.py`
+**Import:** `from src.models import GenericLoRAWithForecasterPruning, FrozenPrunedLinearProbe, DistilledPrunedBackbone, LoRAWithCroprPruning`
 
 ---
 
@@ -114,6 +114,75 @@ from src.evaluation import benchmark_model
 bench = benchmark_model(model, test_loader, device, label="pruned keep=10%")
 print(bench["ms_per_img"])   # inference latency
 print(bench["gflops"])       # FLOPs via fvcore
+```
+
+---
+
+## `LoRAWithCroprPruning`
+
+```python
+LoRAWithCroprPruning(
+    backbone: nn.Module,
+    adapter: ThunderBackboneAdapter,
+    n_classes: int,
+    keep_ratio: float,
+    pruning_rate: int | None = None,
+    llf: bool = True,
+    num_queries: int = 1,
+    num_heads: int = 1,
+    pre_attn_norm: bool = False,
+    q_proj: bool = False,
+    k_proj: bool = False,
+    v_proj: bool = False,
+    mlp: bool = True,
+    mlp_ratio: float = 4.0,
+    lora_r: int = 8,
+    lora_alpha: int = 32,
+    dropout: float = 0.1,
+)
+```
+
+Cropr baseline adapted to EAF backbones. Unlike EAF, Cropr does **not** use
+`prune_layer`: it makes the ViT efficient by applying lightweight auxiliary
+pruning modules progressively after many transformer blocks. Each module removes
+a fixed number of spatial patch tokens. Prefix tokens (CLS/registers) are always
+kept.
+
+With `llf=True`, pruning modules are applied through the third-to-last block and
+the dropped patch tokens are concatenated back before the final block. With
+`llf=False`, pruning modules are applied through the second-to-last block and
+the final block runs on the shortened sequence.
+
+### Parameters
+
+| Argument | Description |
+|---|---|
+| `backbone` | Raw timm model from `get_model_from_name`. |
+| `adapter` | `ThunderBackboneAdapter` for the same backbone. |
+| `n_classes` | Number of output classes. |
+| `keep_ratio` | Convenience target used only when `pruning_rate` is omitted. |
+| `pruning_rate` | Native Cropr control: fixed number of patch tokens removed per Cropr module. |
+| `llf` | Enables Cropr last-layer fusion. |
+| `num_queries`, `num_heads` | Auxiliary cross-attention scorer shape. |
+| `pre_attn_norm`, `q_proj`, `k_proj`, `v_proj`, `mlp`, `mlp_ratio` | Cropr scorer options matching the upstream method. |
+| `lora_r`, `lora_alpha` | LoRA hyperparameters for blocks affected by progressive pruning. |
+| `dropout` | Classification head dropout. |
+
+### Training behavior
+
+During training, `forward(x)` returns `[main_logits, aux_1, ...]`; the training
+script applies the same classification loss to the main classifier and all Cropr
+auxiliary heads. During evaluation, `forward(x)` returns only `main_logits`.
+
+Use it through:
+
+```bash
+python scripts/finetune_pruned.py \
+    --pruning-method cropr \
+    --model-name uni \
+    --dataset-name crc \
+    --base-data-folder /path/to/thunder/data \
+    --cropr-pruning-rate 8
 ```
 
 ---

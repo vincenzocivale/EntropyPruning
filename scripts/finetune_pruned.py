@@ -16,7 +16,7 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, grad_norm, save_results
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
-                        ThunderBackboneAdapter, STRATEGIES)
+                        LoRAWithCroprPruning, ThunderBackboneAdapter, STRATEGIES)
 from src.data.thunder_loaders import build_thunder_loaders
 from src.evaluation import evaluate
 
@@ -30,6 +30,9 @@ def main():
     parser.add_argument("--forecaster-ckpt", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--pruning-method", type=str, default="eaf",
+                        choices=["eaf", "cropr"],
+                        help="Patch pruning method: EAF forecaster or Cropr auxiliary heads.")
     parser.add_argument("--prune-layer", type=int, default=2)
     parser.add_argument("--keep-ratio", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=20)
@@ -51,6 +54,21 @@ def main():
                         help="Phase 1 adaptation strategy.")
     parser.add_argument("--early-stopping-patience", type=int, default=3,
                         help="Epochs without improvement before stopping (default: 3)")
+    parser.add_argument("--cropr-llf", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Use Cropr last-layer fusion: concatenate pruned tokens before the final block.")
+    parser.add_argument("--cropr-pruning-rate", type=int, default=None,
+                        help="Native Cropr setting: fixed number of patch tokens removed per Cropr module. "
+                             "If omitted, a constant rate is derived from --keep-ratio.")
+    parser.add_argument("--cropr-num-queries", type=int, default=1)
+    parser.add_argument("--cropr-num-heads", type=int, default=1)
+    parser.add_argument("--cropr-pre-attn-norm", action="store_true")
+    parser.add_argument("--cropr-q-proj", action="store_true")
+    parser.add_argument("--cropr-k-proj", action="store_true")
+    parser.add_argument("--cropr-v-proj", action="store_true")
+    parser.add_argument("--cropr-no-mlp", action="store_true",
+                        help="Disable the MLP in Cropr auxiliary scorer heads.")
+    parser.add_argument("--cropr-mlp-ratio", type=float, default=4.0)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -61,9 +79,10 @@ def main():
     adapter = ThunderBackboneAdapter(raw_backbone)
     print(f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
           f"n_patches={adapter.n_patches}  prefix={adapter.num_prefix_tokens}")
-    assert args.prune_layer < adapter.n_blocks - 1, \
-        (f"--prune-layer {args.prune_layer} leaves no blocks to LoRA-adapt "
-         f"(n_blocks={adapter.n_blocks})")
+    if args.pruning_method == "eaf":
+        assert args.prune_layer < adapter.n_blocks - 1, \
+            (f"--prune-layer {args.prune_layer} leaves no blocks to LoRA-adapt "
+             f"(n_blocks={adapter.n_blocks})")
 
     base_ckpt = Path("checkpoints")
     classifier_ckpt = args.classifier_ckpt or str(
@@ -81,39 +100,69 @@ def main():
     print(f"Classes ({n_classes}): {class_names}")
 
     # --- W&B init (before baseline so baseline logs appear at step 0) ---
-    run_name = (f"{args.model_name}_{args.dataset_name}"
-                f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
+    if args.pruning_method == "eaf":
+        run_name = (f"{args.model_name}_{args.dataset_name}_eaf"
+                    f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
+    else:
+        rate_tag = args.cropr_pruning_rate if args.cropr_pruning_rate is not None else "auto"
+        run_name = (f"{args.model_name}_{args.dataset_name}_cropr"
+                    f"_rate{rate_tag}_keep{int(args.keep_ratio * 100)}")
     use_wandb = args.wandb_project is not None
     if use_wandb:
+        tags = [
+            args.model_name,
+            args.dataset_name,
+            f"keep_{int(args.keep_ratio * 100)}pct",
+            f"method_{args.pruning_method}",
+            "phase3",
+        ]
+        if args.pruning_method == "eaf":
+            tags.append(f"prune_layer_{args.prune_layer}")
         wandb.init(
             project=args.wandb_project,
             name=run_name,
             job_type="phase3",
             group=f"{args.dataset_name}/{args.model_name}",
             config=vars(args),
-            tags=[args.model_name, args.dataset_name,
-                  f"prune_layer_{args.prune_layer}",
-                  f"keep_{int(args.keep_ratio * 100)}pct",
-                  "phase3"],
+            tags=tags,
         )
 
-    # --- Forecaster ---
-    forecaster = AttentionForecaster(
-        embed_dim=adapter.embed_dim,
-        hidden=args.hidden, n_heads=args.n_heads,
-        n_layers=args.n_layers, dropout=args.dropout,
-    ).to(device)
-    forecaster.load_state_dict(torch.load(forecaster_ckpt, map_location=device))
-    forecaster.eval()
-    for p in forecaster.parameters():
-        p.requires_grad_(False)
-    print(f"Forecaster loaded: {forecaster_ckpt}")
-
     # --- Pruned model ---
-    model = GenericLoRAWithForecasterPruning(
-        backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
-        forecaster=forecaster, prune_layer=args.prune_layer, keep_ratio=args.keep_ratio,
-    ).to(device)
+    if args.pruning_method == "eaf":
+        forecaster = AttentionForecaster(
+            embed_dim=adapter.embed_dim,
+            hidden=args.hidden, n_heads=args.n_heads,
+            n_layers=args.n_layers, dropout=args.dropout,
+        ).to(device)
+        forecaster.load_state_dict(torch.load(forecaster_ckpt, map_location=device))
+        forecaster.eval()
+        for p in forecaster.parameters():
+            p.requires_grad_(False)
+        print(f"Forecaster loaded: {forecaster_ckpt}")
+
+        model = GenericLoRAWithForecasterPruning(
+            backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
+            forecaster=forecaster, prune_layer=args.prune_layer, keep_ratio=args.keep_ratio,
+        ).to(device)
+    else:
+        print("Using Cropr pruning: no EAF forecaster checkpoint is required.")
+        model = LoRAWithCroprPruning(
+            backbone=raw_backbone,
+            adapter=adapter,
+            n_classes=n_classes,
+            keep_ratio=args.keep_ratio,
+            pruning_rate=args.cropr_pruning_rate,
+            llf=args.cropr_llf,
+            num_queries=args.cropr_num_queries,
+            num_heads=args.cropr_num_heads,
+            pre_attn_norm=args.cropr_pre_attn_norm,
+            q_proj=args.cropr_q_proj,
+            k_proj=args.cropr_k_proj,
+            v_proj=args.cropr_v_proj,
+            mlp=not args.cropr_no_mlp,
+            mlp_ratio=args.cropr_mlp_ratio,
+        ).to(device)
+        print(f"Cropr schedule: layers={model.prune_layers} remove={model.cropr_schedule}")
     if Path(classifier_ckpt).exists():
         missing, unexpected = model.load_state_dict(
             torch.load(classifier_ckpt, map_location=device), strict=False)
@@ -133,9 +182,12 @@ def main():
 
     # --- Optimizer (AMP) ---
     backbone_params = [p for _, p in model.backbone.named_parameters() if p.requires_grad]
+    head_params = list(model.head.parameters())
+    if hasattr(model, "cropr"):
+        head_params += list(model.cropr.parameters())
     opt = torch.optim.AdamW([
         {"params": backbone_params, "lr": args.lr_backbone},
-        {"params": model.head.parameters(), "lr": args.lr_head},
+        {"params": head_params, "lr": args.lr_head},
     ], weight_decay=args.weight_decay)
     total_steps = args.epochs * len(train_loader)
     sched = torch.optim.lr_scheduler.OneCycleLR(
@@ -159,8 +211,13 @@ def main():
             imgs, labels = imgs.to(device), labels.to(device)
 
             with autocast("cuda"):
-                logits = model(imgs)
-                loss = criterion(logits, labels)
+                outputs = model(imgs)
+                if isinstance(outputs, list):
+                    logits = outputs[0]
+                    loss = sum(criterion(out, labels) for out in outputs)
+                else:
+                    logits = outputs
+                    loss = criterion(logits, labels)
             opt.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -228,7 +285,8 @@ def main():
     results = {
         "model_name": args.model_name,
         "dataset_name": args.dataset_name,
-        "prune_layer": args.prune_layer,
+        "pruning_method": args.pruning_method,
+        "prune_layer": args.prune_layer if args.pruning_method == "eaf" else None,
         "keep_ratio": args.keep_ratio,
         "n_classes": n_classes,
         "pre_val_acc": round(pre["acc"], 6),
@@ -239,6 +297,12 @@ def main():
         "test_tar_at_far": round(float(test_m["tar_at_far"]), 6),
         "args": vars(args),
     }
+    if hasattr(model, "cropr"):
+        results.update({
+            "cropr_prune_layers": model.prune_layers,
+            "cropr_schedule": model.cropr_schedule,
+            "cropr_llf": model.llf,
+        })
     path = save_results(output_dir / f"results_{run_name}.json", results)
     print(f"Results saved to: {path}")
 

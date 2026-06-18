@@ -15,6 +15,7 @@ The pipeline is built on top of [THUNDER](https://github.com/MICS-Lab/thunder) f
 | [Architecture](architecture.md) | System design, class hierarchy, data flow |
 | [Adaptation Strategies](adaptation_strategies.md) | Choosing between linear probing, LoRA, full fine-tuning, BitFit |
 | [Training Pipeline](training_pipeline.md) | Step-by-step Phase 1 → 2 → 3 guide |
+| [Alternative Pruning Methods](alternative_pruning_methods.md) | External-method policy and Cropr baseline |
 | [Training Performance Bottlenecks](performance_bottlenecks.md) | CPU/RAM-aware bottlenecks and resource-friendly run settings |
 | [Avviare un esperimento](run_experiment.md) | Comandi pronti all'uso dato encoder + dataset |
 | [Thunder Integration](thunder_integration.md) | How Thunder models and datasets are used |
@@ -22,7 +23,7 @@ The pipeline is built on top of [THUNDER](https://github.com/MICS-Lab/thunder) f
 | [Classifiers](api/classifiers.md) | `BaseClassifier`, all strategy classes, `build_classifier` |
 | [BackboneAdapter](api/backbone_adapter.md) | `ThunderBackboneAdapter` |
 | [Forecaster](api/forecaster.md) | `AttentionForecaster` |
-| [Pruned Models](api/pruned_model.md) | `GenericLoRAWithForecasterPruning`, `FrozenPrunedLinearProbe`, `DistilledPrunedBackbone` |
+| [Pruned Models](api/pruned_model.md) | `GenericLoRAWithForecasterPruning`, `LoRAWithCroprPruning`, `FrozenPrunedLinearProbe`, `DistilledPrunedBackbone` |
 
 ---
 

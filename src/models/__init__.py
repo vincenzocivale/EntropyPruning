@@ -15,3 +15,9 @@ from .pruned_classifier import (
     DistilledPrunedBackbone,
     post_prune_lora_targets,
 )
+from .cropr import (
+    CroprScorer,
+    LoRAWithCroprPruning,
+    cropr_pruning_schedule,
+    cropr_lora_targets,
+)

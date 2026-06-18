@@ -133,6 +133,23 @@ python scripts/finetune_pruned.py \
 
 **Output:** `checkpoints/$DATASET/${MODEL}_pruned/best_${MODEL}_prune2_keep10.pt`
 
+### Cropr baseline
+
+`finetune_pruned.py` can also run a Cropr-style pruning baseline instead of EAF:
+
+```bash
+python scripts/finetune_pruned.py \
+    --pruning-method cropr \
+    --model-name $MODEL \
+    --dataset-name $DATASET \
+    --base-data-folder $DATA \
+    --cropr-pruning-rate 8
+```
+
+Cropr does not load an `AttentionForecaster`; it trains auxiliary pruning heads
+jointly with the classifier. Cropr does not use EAF's `--prune-layer`: it prunes
+progressively after many transformer blocks. See [Alternative Pruning Methods](alternative_pruning_methods.md).
+
 ### `--keep-ratio` sweep
 
 ```bash
