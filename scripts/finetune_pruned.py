@@ -114,9 +114,14 @@ def main():
         backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
         forecaster=forecaster, prune_layer=args.prune_layer, keep_ratio=args.keep_ratio,
     ).to(device)
-    missing, unexpected = model.load_state_dict(
-        torch.load(classifier_ckpt, map_location=device), strict=False)
-    print(f"Checkpoint loaded: missing={len(missing)} unexpected={len(unexpected)}")
+    if Path(classifier_ckpt).exists():
+        missing, unexpected = model.load_state_dict(
+            torch.load(classifier_ckpt, map_location=device), strict=False)
+        print(f"Checkpoint loaded: missing={len(missing)} unexpected={len(unexpected)}")
+    else:
+        print(f"No Phase 1 classifier checkpoint at {classifier_ckpt} — "
+              f"starting from pretrained backbone + freshly initialized head "
+              f"(unsupervised EAF flow, no Phase 1 required).")
 
     pre = evaluate(model, val_loader, device, args.far_threshold)
     print(f"\nPre fine-tuning val: acc={pre['acc']:.3f}  f1={pre['f1_macro']:.3f}")

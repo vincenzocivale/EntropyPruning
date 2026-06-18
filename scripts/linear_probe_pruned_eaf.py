@@ -162,6 +162,10 @@ def main():
     ap.add_argument("--per-dataset-dir",    type=str,   default=None,
                     help="Directory of per-dataset forecaster checkpoints. "
                          "Default: {cache-dir}/per_dataset")
+    ap.add_argument("--universal-forecaster-ckpt", type=str, default=None,
+                    help="Optional explicit path to the universal forecaster checkpoint, "
+                         "overriding the {cache-dir}/{model}_forecaster/... naming convention "
+                         "(e.g. a non-default hidden size such as uni_forecaster_h512).")
     ap.add_argument("--backbone-ckpt",      type=str,   default=None,
                     help="Optional state_dict to load onto the backbone before probing "
                          "(e.g. a CLS-distilled backbone from scripts/distill_pruned.py). "
@@ -252,9 +256,13 @@ def main():
             # Universal forecaster is loaded once and reused across all datasets
             universal_forecaster = None
             if eaf_type == "universal":
-                ckpt = _forecaster_path(
-                    "universal", None, args.model_name, layers_source,
-                    layer_target, cache_dir, per_dataset_dir,
+                ckpt = (
+                    Path(args.universal_forecaster_ckpt)
+                    if args.universal_forecaster_ckpt
+                    else _forecaster_path(
+                        "universal", None, args.model_name, layers_source,
+                        layer_target, cache_dir, per_dataset_dir,
+                    )
                 )
                 if not ckpt.exists():
                     print(f"\n[universal] Checkpoint not found: {ckpt} — skipping")
