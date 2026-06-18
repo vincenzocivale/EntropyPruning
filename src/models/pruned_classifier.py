@@ -265,18 +265,21 @@ class DistilledPrunedBackbone(nn.Module):
         """The underlying timm VisionTransformer (unwrapped from peft)."""
         return self.backbone.model
 
-    def forward(self, x):
+    def forward(self, x, return_tokens: bool = False):
         num_prefix = self.num_prefix
         forecaster = self.forecaster
         keep_ratio = self.keep_ratio
+        kept_idx = None
 
         def _prune(module, input, output):
+            nonlocal kept_idx
             prefix = output[:, :num_prefix]
             patches = output[:, num_prefix:]
             with torch.no_grad():
                 scores = forecaster(patches)
             k = max(1, int(patches.shape[1] * keep_ratio))
             idx = scores.topk(k, dim=-1).indices
+            kept_idx = idx
             kept = patches.gather(1, idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
             return torch.cat([prefix, kept], dim=1)
 
@@ -285,4 +288,13 @@ class DistilledPrunedBackbone(nn.Module):
             features = self.raw_backbone.forward_features(x)
         finally:
             handle.remove()
-        return features[:, 0]
+        if not return_tokens:
+            return features[:, 0]
+        if kept_idx is None:
+            raise RuntimeError("Pruning hook did not run; check prune_layer/backbone blocks.")
+        return {
+            "features": features,
+            "cls": features[:, 0],
+            "tokens": features[:, num_prefix:],
+            "kept_indices": kept_idx,
+        }

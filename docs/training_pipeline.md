@@ -341,14 +341,17 @@ Argomenti principali:
 | `--backbone-ckpt` | nessuno | se impostato, carica questo `state_dict` sul backbone prima del probing (es. output di Step 3b) |
 | `--backbone-tag` | `pretrained` | etichetta scritta nella colonna `backbone_variant` del CSV, per distinguere righe `pretrained` da righe `distilled` nello stesso file |
 
-### Step 3b — Distillazione CLS token (Approccio 3, dataset-agnostic)
+### Step 3b — Distillazione feature token-level (Approccio 3, dataset-agnostic)
 
 Terza alternativa di Phase 3, oltre a `finetune_pruned.py` (Approccio 2 — LoRA + cross-entropy su un solo
 dataset) e a Step 3 (Approccio 1 — backbone interamente frozen). Qui i blocchi **dopo** `--prune-layer`
-ricevono adapter LoRA addestrati con una loss di **distillazione**: devono riprodurre il CLS token che lo
-stesso backbone, frozen e senza pruning, avrebbe prodotto (`DistilledPrunedBackbone` in
-`src/models/pruned_classifier.py`). Nessuna label, nessuna testa di classificazione: il corpus è l'unione
-di più dataset THUNDER, esattamente come nello Step 1/2a.
+ricevono adapter LoRA addestrati con una loss di **distillazione**: devono riprodurre gli hidden state finali
+che lo stesso backbone, frozen e senza pruning, avrebbe prodotto (`DistilledPrunedBackbone` in
+`src/models/pruned_classifier.py`). Il termine principale confronta, con cosine distance, i token patch
+sopravvissuti allo student con i token teacher corrispondenti agli stessi indici originali. Due termini
+ausiliari confrontano il CLS con cosine distance e la magnitudine del CLS con SmoothL1. Nessuna label,
+nessuna testa di classificazione: il corpus è l'unione di più dataset THUNDER, esattamente come nello
+Step 1/2a.
 
 ```bash
 THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
@@ -373,7 +376,8 @@ Argomenti principali:
 |---|---|---|
 | `--datasets` | i 16 dataset THUNDER | corpus di immagini per la distillazione (nessuna label usata) |
 | `--forecaster-ckpt` | forecaster universale in `--cache-dir` | deve corrispondere a `--prune-layer` come source layer |
-| `--mse-weight`, `--cosine-weight` | `1.0`, `1.0` | pesi della loss combinata MSE + (1 − cosine similarity) sul CLS token |
+| `--token-weight`, `--cls-weight`, `--mag-weight` | `1.0`, `0.5`, `0.1` | pesi di token cosine, CLS cosine e SmoothL1 sulle norme CLS |
+| `--keep-ratio-min` | unset | se impostato, campiona a ogni step un keep ratio uniforme in `[keep-ratio-min, keep-ratio]`; la validazione resta a `--keep-ratio` |
 | `--lora-r`, `--lora-alpha` | `8`, `32` | LoRA solo sui blocchi dopo `--prune-layer` |
 | `--epochs` | `10` | |
 

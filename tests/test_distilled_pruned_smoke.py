@@ -68,6 +68,20 @@ def test_forward_backward_shapes_and_grad():
     )
 
 
+def test_forward_can_return_kept_tokens_and_original_indices():
+    student, _ = _build_student()
+    x = torch.randn(B, NUM_PREFIX + N_PATCHES, D)
+    out = student(x, return_tokens=True)
+    k = int(N_PATCHES * student.keep_ratio)
+
+    assert out["cls"].shape == (B, D)
+    assert out["tokens"].shape == (B, k, D)
+    assert out["features"].shape == (B, NUM_PREFIX + k, D)
+    assert out["kept_indices"].shape == (B, k)
+    assert out["kept_indices"].min() >= 0
+    assert out["kept_indices"].max() < N_PATCHES
+
+
 def test_merge_and_unload_removes_lora():
     student, _ = _build_student()
     merged = student.backbone.merge_and_unload()
