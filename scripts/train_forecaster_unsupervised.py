@@ -29,7 +29,7 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, save_results
 from src.models import AttentionForecaster
-from src.data import MultiH5ForecastDataset
+from src.data import MultiH5ForecastDataset, BlockShuffleH5Dataset
 from src.collection import build_attention_cache, build_frozen_model
 
 DEFAULT_DATASETS = [
@@ -106,6 +106,10 @@ def main():
     parser.add_argument("--cache-num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--shuffle-block-size", type=int, default=32,
+                        help="Rows per contiguous on-disk micro-block for the train "
+                             "loader's block-shuffle (must divide --batch-size). Set to "
+                             "1 to recover plain per-row shuffling.")
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=2)
@@ -160,11 +164,18 @@ def main():
     train_ds = MultiH5ForecastDataset(cache_paths, "train", args.layers_source, layer_target)
     val_ds = MultiH5ForecastDataset(cache_paths, "val", args.layers_source, layer_target)
     test_ds = MultiH5ForecastDataset(cache_paths, "test", args.layers_source, layer_target)
-    train_loader = DataLoader(train_ds, shuffle=True, **kw)
+    block_train_ds = BlockShuffleH5Dataset(
+        train_ds, batch_size=args.batch_size, micro_block_size=args.shuffle_block_size,
+        seed=args.seed,
+    )
+    train_loader = DataLoader(
+        block_train_ds, batch_size=None, num_workers=args.num_workers,
+        pin_memory=True, persistent_workers=False,
+    )
     val_loader = DataLoader(val_ds, shuffle=False, **kw)
     test_loader = DataLoader(test_ds, shuffle=False, **kw)
     print(f"Samples: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
-    print(f"Steps/epoch: {len(train_loader)}")
+    print(f"Steps/epoch (approx, block-shuffled): {len(block_train_ds)}")
 
     src_tag = "src" + "+".join(f"{ls:02d}" for ls in args.layers_source)
     run_name = f"{args.model_name}_universal_{src_tag}_attn{layer_target:02d}"
@@ -196,8 +207,9 @@ def main():
 
     best_val_kl, best_val_rho = float('inf'), -1.0
     for epoch in range(args.epochs):
+        block_train_ds.set_epoch(epoch)
         forecaster.train()
-        train_kl = 0.
+        train_kl, n_batches = 0., 0
         for emb, target, _, _ in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1} train"):
             emb, target = emb.to(device), target.to(device)
             with torch.amp.autocast("cuda"):
@@ -210,7 +222,8 @@ def main():
             scaler.step(opt)
             scaler.update()
             train_kl += loss.item()
-        train_kl /= len(train_loader)
+            n_batches += 1
+        train_kl /= n_batches
 
         val_metrics = _evaluate(forecaster, val_loader, device, list(cache_paths.keys()))
         sched.step()

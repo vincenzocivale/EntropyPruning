@@ -20,7 +20,7 @@ from thunder.models.pretrained_models import get_model_from_name
 from src.utils import set_seed, get_device, save_results
 from src.models import AttentionForecaster, ThunderBackboneAdapter, build_classifier, STRATEGIES
 from src.data.thunder_loaders import build_thunder_loaders
-from src.data.h5_dataset import H5ForecastDataset
+from src.data.h5_dataset import H5ForecastDataset, BlockShuffleH5Dataset
 from src.collection import collect_and_save_dataset
 
 
@@ -59,9 +59,15 @@ def train_forecaster(layer_source, layer_target, cfg, device):
         pin_memory=True,
         persistent_workers=(cfg["num_workers"] > 0),
     )
-    train_loader = DataLoader(
+    block_train_ds = BlockShuffleH5Dataset(
         H5ForecastDataset(cfg["dataset_cache"], "train", layer_source, layer_target),
-        shuffle=True, **kw)
+        batch_size=cfg["batch_size"], micro_block_size=cfg["shuffle_block_size"],
+        seed=cfg["seed"],
+    )
+    train_loader = DataLoader(
+        block_train_ds, batch_size=None, num_workers=cfg["num_workers"],
+        pin_memory=True, persistent_workers=False,
+    )
     val_loader = DataLoader(
         H5ForecastDataset(cfg["dataset_cache"], "val", layer_source, layer_target),
         shuffle=False, **kw)
@@ -80,8 +86,9 @@ def train_forecaster(layer_source, layer_target, cfg, device):
     save_path = cfg["forecaster_dir"] / f"forecaster_{run_name}.pt"
 
     for epoch in range(cfg["epochs"]):
+        block_train_ds.set_epoch(epoch)
         forecaster.train()
-        train_kl = 0.
+        train_kl, n_batches = 0., 0
         for emb, target, _ in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1} train"):
             emb, target = emb.to(device), target.to(device)
             with torch.amp.autocast("cuda"):
@@ -94,6 +101,7 @@ def train_forecaster(layer_source, layer_target, cfg, device):
             scaler.step(opt)
             scaler.update()
             train_kl += loss.item()
+            n_batches += 1
 
         forecaster.eval()
         val_kl, val_rho_list = 0., []
@@ -105,7 +113,7 @@ def train_forecaster(layer_source, layer_target, cfg, device):
                 val_rho_list.append(spearman_correlation(logits, target))
         sched.step()
 
-        train_kl /= len(train_loader)
+        train_kl /= n_batches
         val_kl /= len(val_loader)
         val_rho = torch.cat(val_rho_list).mean().item()
         wandb.log({"epoch": epoch+1, "train/kl": train_kl, "val/kl": val_kl,
@@ -168,6 +176,10 @@ def main():
                         help="Adaptation strategy used in Phase 1 (default: lora)")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--shuffle-block-size", type=int, default=32,
+                        help="Rows per contiguous on-disk micro-block for the train "
+                             "loader's block-shuffle (must divide --batch-size). Set to "
+                             "1 to recover plain per-row shuffling.")
     parser.add_argument("--layers-source", type=int, nargs="+", default=[2])
     parser.add_argument("--layer-target", type=int, default=None,
                         help="Defaults to last block (n_blocks-1).")
@@ -217,6 +229,7 @@ def main():
         dropout=args.dropout, epochs=args.epochs, lr=args.lr,
         weight_decay=args.weight_decay, wandb_project=args.wandb_project,
         batch_size=args.batch_size, num_workers=args.num_workers,
+        shuffle_block_size=args.shuffle_block_size, seed=args.seed,
     )
     cfg["forecaster_dir"].mkdir(parents=True, exist_ok=True)
 

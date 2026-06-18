@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils import set_seed, get_device
 from src.models import AttentionForecaster
-from src.data import MultiH5ForecastDataset
+from src.data import MultiH5ForecastDataset, BlockShuffleH5Dataset
 
 
 def spearman_correlation(y_pred, y_true):
@@ -49,7 +49,8 @@ def _evaluate(forecaster, loader, device):
 
 def train_one(dataset_name, cache_path, save_path, layer_source, layer_target,
               embed_dim, hidden, n_heads, n_layers, dropout,
-              epochs, lr, weight_decay, batch_size, num_workers, device, seed):
+              epochs, lr, weight_decay, batch_size, num_workers, device, seed,
+              shuffle_block_size=32):
     set_seed(seed)
     cache = {dataset_name: cache_path}
     kw = dict(batch_size=batch_size, num_workers=num_workers,
@@ -57,7 +58,13 @@ def train_one(dataset_name, cache_path, save_path, layer_source, layer_target,
     train_ds = MultiH5ForecastDataset(cache, "train", layer_source, layer_target)
     val_ds   = MultiH5ForecastDataset(cache, "val",   layer_source, layer_target)
     test_ds  = MultiH5ForecastDataset(cache, "test",  layer_source, layer_target)
-    train_loader = DataLoader(train_ds, shuffle=True,  **kw)
+    block_train_ds = BlockShuffleH5Dataset(
+        train_ds, batch_size=batch_size, micro_block_size=shuffle_block_size, seed=seed,
+    )
+    train_loader = DataLoader(
+        block_train_ds, batch_size=None, num_workers=num_workers,
+        pin_memory=True, persistent_workers=False,
+    )
     val_loader   = DataLoader(val_ds,   shuffle=False, **kw)
     test_loader  = DataLoader(test_ds,  shuffle=False, **kw)
 
@@ -77,6 +84,7 @@ def train_one(dataset_name, cache_path, save_path, layer_source, layer_target,
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(epochs):
+        block_train_ds.set_epoch(epoch)
         forecaster.train()
         for emb, target, _, _ in tqdm(train_loader, leave=False,
                                        desc=f"[{dataset_name}] Ep{epoch+1}"):
@@ -118,6 +126,10 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--batch-size",   type=int, default=128)
     parser.add_argument("--num-workers",  type=int, default=4)
+    parser.add_argument("--shuffle-block-size", type=int, default=32,
+                        help="Rows per contiguous on-disk micro-block for the train "
+                             "loader's block-shuffle (must divide --batch-size). Set to "
+                             "1 to recover plain per-row shuffling.")
     parser.add_argument("--seed",         type=int, default=42)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/unsupervised/per_dataset")
     parser.add_argument("--out-csv",        type=str, default="logs/per_dataset_eaf_rho.csv")
@@ -148,6 +160,7 @@ def main():
                     args.embed_dim, args.hidden, args.n_heads, args.n_layers, args.dropout,
                     args.epochs, args.lr, args.weight_decay,
                     args.batch_size, args.num_workers, device, args.seed,
+                    shuffle_block_size=args.shuffle_block_size,
                 )
                 writer.writerow([name, round(val_rho, 6), round(test_rho, 6)])
                 f.flush()
