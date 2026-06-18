@@ -62,3 +62,45 @@ Useful Cropr flags:
 --cropr-no-mlp
 --cropr-mlp-ratio 4
 ```
+
+## EViT
+
+Source: https://github.com/youweiliang/evit
+
+Reference inspected: public `master` branch on 2026-06-18.
+
+EAF includes a compact EViT integration in `src/models/evit.py`. It keeps the
+paper's parameter-free token reorganization: selected transformer blocks rank
+spatial patch tokens by class-token attention after MHSA, keep the top tokens,
+and optionally fuse inattentive tokens into one extra token before the block
+MLP. CLS/register prefix tokens are never pruned.
+
+Run EViT fine-tuning with:
+
+```bash
+python scripts/finetune_pruned.py \
+    --pruning-method evit \
+    --model-name uni \
+    --dataset-name crc \
+    --base-data-folder /path/to/thunder/data \
+    --evit-drop-loc 3,6,9 \
+    --evit-base-keep-rate 0.7 \
+    --evit-fuse-token
+```
+
+EViT does not use an EAF `AttentionForecaster` and does not use
+`--prune-layer`. Its native controls are `--evit-drop-loc`, the block indices
+where token reorganization is applied, `--evit-base-keep-rate`, the per-shrink
+keep rate, and `--evit-fuse-token` / `--no-evit-fuse-token`. If
+`--evit-base-keep-rate` is omitted, `finetune_pruned.py` uses `--keep-ratio` as
+a convenience alias.
+
+Useful EViT flags:
+
+```bash
+--evit-drop-loc 3,6,9
+--evit-base-keep-rate 0.7
+--evit-fuse-token / --no-evit-fuse-token
+--evit-shrink-start-epoch 10
+--evit-shrink-epochs 0
+```

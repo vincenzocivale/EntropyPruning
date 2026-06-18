@@ -1,4 +1,4 @@
-"""Inference-only evaluation of EAF pruned checkpoints.
+"""Inference-only evaluation of pruned checkpoints.
 
 Reloads trained checkpoints and evaluates on the test split without retraining.
 Requires the same --model-name used during the original training run.
@@ -17,9 +17,17 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import get_device, set_seed
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
-                        ThunderBackboneAdapter)
+                        LoRAWithEViTPruning, ThunderBackboneAdapter,
+                        parse_evit_drop_locs)
 from src.data.thunder_loaders import build_thunder_loaders
 from src.evaluation import evaluate, benchmark_model
+
+
+def first_existing(paths):
+    for path in paths:
+        if path.exists():
+            return path
+    return paths[0]
 
 
 def evaluate_one(
@@ -27,8 +35,12 @@ def evaluate_one(
     dataset_name: str,
     base_data_folder: str,
     ckpt_root: Path,
+    pruning_method: str,
     keep_ratio: float,
     prune_layer: int,
+    evit_drop_loc: str,
+    evit_base_keep_rate: float | None,
+    evit_fuse_token: bool,
     batch_size: int,
     num_workers: int,
     far_threshold: float,
@@ -39,25 +51,42 @@ def evaluate_one(
     forecaster_dropout: float,
 ):
     keep_pct = int(round(keep_ratio * 100))
-    run_name = f"{model_name}_prune{prune_layer}_keep{keep_pct}"
+    pruned_dir = ckpt_root / dataset_name / f"{model_name}_pruned"
 
-    pruned_ckpt = (
-        ckpt_root / dataset_name / f"{model_name}_pruned" / f"best_{run_name}.pt"
-    )
-    forecaster_ckpt = (
-        ckpt_root / dataset_name / f"{model_name}_forecaster" /
-        f"forecaster_src{prune_layer:02d}_tgt??.pt"
-    )
-    # Resolve wildcard for target layer
-    forecaster_candidates = list(
-        (ckpt_root / dataset_name / f"{model_name}_forecaster").glob(
-            f"forecaster_src{prune_layer:02d}_tgt*.pt"
+    if pruning_method == "eaf":
+        run_name = f"{model_name}_prune{prune_layer}_keep{keep_pct}"
+        current_run_name = f"{model_name}_{dataset_name}_eaf_prune{prune_layer}_keep{keep_pct}"
+        pruned_ckpt = first_existing([
+            pruned_dir / f"best_{current_run_name}.pt",
+            pruned_dir / f"best_{run_name}.pt",
+        ])
+        forecaster_candidates = list(
+            (ckpt_root / dataset_name / f"{model_name}_forecaster").glob(
+                f"forecaster_src{prune_layer:02d}_tgt*.pt"
+            )
         )
-    )
+    else:
+        rate = evit_base_keep_rate if evit_base_keep_rate is not None else keep_ratio
+        keep_ratio = rate
+        keep_pct = int(round(rate * 100))
+        drop_locs = parse_evit_drop_locs(evit_drop_loc, n_blocks=10**9)
+        drop_tag = "-".join(str(x) for x in drop_locs)
+        fuse_tag = "fuse" if evit_fuse_token else "nofuse"
+        run_name = (
+            f"{model_name}_{dataset_name}_evit_drop{drop_tag}"
+            f"_basekeep{int(rate * 100)}_{fuse_tag}"
+        )
+        legacy_run_name = f"{model_name}_{dataset_name}_evit_drop{drop_tag}_basekeep{int(rate * 100)}"
+        pruned_ckpt = first_existing([
+            pruned_dir / f"best_{run_name}.pt",
+            pruned_dir / f"best_{legacy_run_name}.pt",
+        ])
+        forecaster_candidates = []
 
     result = {
-        "model": model_name, "dataset": dataset_name,
+        "method": pruning_method, "model": model_name, "dataset": dataset_name,
         "keep_ratio": keep_ratio, "keep_pct": keep_pct, "prune_layer": prune_layer,
+        "evit_drop_locs": "", "evit_base_keep_rate": None, "evit_fuse_token": None,
         "status": "ok", "checkpoint": str(pruned_ckpt),
         "acc": None, "f1_macro": None, "tar_at_far": None,
         "threshold": None, "ms_per_img": None, "gflops": None, "message": "",
@@ -67,13 +96,12 @@ def evaluate_one(
         result.update(status="checkpoint_missing",
                       message=f"Missing: {pruned_ckpt}")
         return result
-    if not forecaster_candidates:
+    if pruning_method == "eaf" and not forecaster_candidates:
         result.update(status="checkpoint_missing",
                       message=f"No forecaster for src={prune_layer} in "
                               f"{ckpt_root/dataset_name/f'{model_name}_forecaster'}")
         return result
 
-    forecaster_ckpt = forecaster_candidates[0]  # pick first match
     set_seed(seed)
     device = get_device()
 
@@ -85,19 +113,35 @@ def evaluate_one(
         batch_size, num_workers, drop_last_train=False,
     )
 
-    forecaster = AttentionForecaster(
-        embed_dim=adapter.embed_dim,
-        hidden=hidden, n_heads=n_heads, n_layers=n_layers, dropout=forecaster_dropout,
-    ).to(device)
-    forecaster.load_state_dict(torch.load(forecaster_ckpt, map_location=device))
-    forecaster.eval()
-    for p in forecaster.parameters():
-        p.requires_grad_(False)
+    if pruning_method == "eaf":
+        forecaster_ckpt = forecaster_candidates[0]
+        forecaster = AttentionForecaster(
+            embed_dim=adapter.embed_dim,
+            hidden=hidden, n_heads=n_heads, n_layers=n_layers, dropout=forecaster_dropout,
+        ).to(device)
+        forecaster.load_state_dict(torch.load(forecaster_ckpt, map_location=device))
+        forecaster.eval()
+        for p in forecaster.parameters():
+            p.requires_grad_(False)
 
-    model = GenericLoRAWithForecasterPruning(
-        backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
-        forecaster=forecaster, prune_layer=prune_layer, keep_ratio=keep_ratio,
-    ).to(device)
+        model = GenericLoRAWithForecasterPruning(
+            backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
+            forecaster=forecaster, prune_layer=prune_layer, keep_ratio=keep_ratio,
+        ).to(device)
+    else:
+        drop_locs = parse_evit_drop_locs(evit_drop_loc, adapter.n_blocks)
+        rate = evit_base_keep_rate if evit_base_keep_rate is not None else keep_ratio
+        model = LoRAWithEViTPruning(
+            backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
+            base_keep_rate=rate, drop_locs=drop_locs, fuse_token=evit_fuse_token,
+        ).to(device)
+        model.set_keep_rate(rate)
+        result.update(
+            evit_drop_locs=",".join(str(x) for x in drop_locs),
+            evit_base_keep_rate=rate,
+            evit_fuse_token=evit_fuse_token,
+        )
+
     missing, unexpected = model.load_state_dict(
         torch.load(pruned_ckpt, map_location=device), strict=False)
     model.eval()
@@ -120,7 +164,7 @@ def evaluate_one(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inference-only evaluation of EAF pruned checkpoints")
+        description="Inference-only evaluation of EAF/EViT pruned checkpoints")
     parser.add_argument("--model-name", type=str, required=True,
                         help="Thunder model name used during training (e.g. uni, hoptimus0)")
     parser.add_argument("--dataset-name", type=str, required=True,
@@ -129,8 +173,15 @@ def main():
                         help="Path to Thunder base data folder")
     parser.add_argument("--ckpt-root", type=str, default="checkpoints",
                         help="Root directory for model checkpoints")
+    parser.add_argument("--pruning-method", type=str, default="eaf",
+                        choices=["eaf", "evit"])
     parser.add_argument("--keep-ratios", type=float, nargs="+", default=[0.1, 0.2])
     parser.add_argument("--prune-layers", type=int, nargs="+", default=[2])
+    parser.add_argument("--evit-drop-loc", type=str, default="3,6,9")
+    parser.add_argument("--evit-base-keep-rates", type=float, nargs="+", default=None,
+                        help="EViT base keep rates to evaluate. Defaults to --keep-ratios.")
+    parser.add_argument("--evit-fuse-token", action=argparse.BooleanOptionalAction,
+                        default=True)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--far-threshold", type=float, default=1e-4)
@@ -147,17 +198,26 @@ def main():
     ckpt_root = Path(args.ckpt_root)
     rows = []
 
-    for prune_layer in args.prune_layers:
-        for keep_ratio in args.keep_ratios:
+    prune_layers = args.prune_layers if args.pruning_method == "eaf" else [None]
+    keep_values = args.keep_ratios
+    if args.pruning_method == "evit" and args.evit_base_keep_rates is not None:
+        keep_values = args.evit_base_keep_rates
+
+    for prune_layer in prune_layers:
+        for keep_ratio in keep_values:
             print(f"\n[RUN] model={args.model_name} dataset={args.dataset_name} "
-                  f"prune_layer={prune_layer} keep_ratio={keep_ratio}")
+                  f"method={args.pruning_method} prune_layer={prune_layer} keep={keep_ratio}")
             row = evaluate_one(
                 model_name=args.model_name,
                 dataset_name=args.dataset_name,
                 base_data_folder=args.base_data_folder,
                 ckpt_root=ckpt_root,
+                pruning_method=args.pruning_method,
                 keep_ratio=keep_ratio,
-                prune_layer=prune_layer,
+                prune_layer=-1 if prune_layer is None else prune_layer,
+                evit_drop_loc=args.evit_drop_loc,
+                evit_base_keep_rate=keep_ratio if args.pruning_method == "evit" else None,
+                evit_fuse_token=args.evit_fuse_token,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 far_threshold=args.far_threshold,
@@ -173,7 +233,8 @@ def main():
 
     output_csv = Path(args.output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["model", "dataset", "keep_ratio", "keep_pct", "prune_layer",
+    fieldnames = ["method", "model", "dataset", "keep_ratio", "keep_pct", "prune_layer",
+                  "evit_drop_locs", "evit_base_keep_rate", "evit_fuse_token",
                   "status", "checkpoint", "acc", "f1_macro", "tar_at_far",
                   "threshold", "ms_per_img", "gflops", "message"]
     with output_csv.open("w", newline="") as f:

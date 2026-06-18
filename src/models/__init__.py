@@ -21,3 +21,10 @@ from .cropr import (
     cropr_pruning_schedule,
     cropr_lora_targets,
 )
+from .evit import (
+    LoRAWithEViTPruning,
+    adjust_evit_keep_rate,
+    complement_indices,
+    evit_lora_targets,
+    parse_evit_drop_locs,
+)

@@ -150,6 +150,26 @@ Cropr does not load an `AttentionForecaster`; it trains auxiliary pruning heads
 jointly with the classifier. Cropr does not use EAF's `--prune-layer`: it prunes
 progressively after many transformer blocks. See [Alternative Pruning Methods](alternative_pruning_methods.md).
 
+### EViT baseline
+
+`finetune_pruned.py` can also run EViT token reorganization from Liang et al.:
+
+```bash
+python scripts/finetune_pruned.py \
+    --pruning-method evit \
+    --model-name $MODEL \
+    --dataset-name $DATASET \
+    --base-data-folder $DATA \
+    --evit-drop-loc 3,6,9 \
+    --evit-base-keep-rate 0.7 \
+    --evit-fuse-token
+```
+
+EViT does not load an `AttentionForecaster` and does not use `--prune-layer`.
+It ranks patches with the current block's CLS attention, keeps the most
+attentive patch tokens, and optionally fuses inattentive tokens before the MLP.
+See [Alternative Pruning Methods](alternative_pruning_methods.md).
+
 ### `--keep-ratio` sweep
 
 ```bash
@@ -176,6 +196,20 @@ python scripts/evaluate_pruned_checkpoints.py \
     --prune-layers 2 \
     --keep-ratios 0.05 0.1 0.2 0.3 0.5 \
     --output-csv results/eval_${MODEL}_${DATASET}.csv
+```
+
+Reload EVIT checkpoints with:
+
+```bash
+python scripts/evaluate_pruned_checkpoints.py \
+    --pruning-method evit \
+    --model-name $MODEL \
+    --dataset-name $DATASET \
+    --base-data-folder $DATA \
+    --evit-drop-loc 3,6,9 \
+    --evit-base-keep-rates 0.7 0.6 0.5 \
+    --evit-fuse-token \
+    --output-csv results/eval_evit_${MODEL}_${DATASET}.csv
 ```
 
 The CSV contains accuracy, F1-macro, AUROC, TAR@FAR, ms/img, and GFLOPs for each configuration.

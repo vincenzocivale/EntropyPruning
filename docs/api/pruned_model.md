@@ -187,6 +187,56 @@ python scripts/finetune_pruned.py \
 
 ---
 
+## `LoRAWithEViTPruning`
+
+```python
+LoRAWithEViTPruning(
+    backbone,
+    adapter,
+    n_classes: int,
+    base_keep_rate: float,
+    drop_locs: Sequence[int],
+    fuse_token: bool = True,
+    lora_r: int = 8,
+    lora_alpha: int = 32,
+    dropout: float = 0.1,
+)
+```
+
+EViT baseline adapted to EAF backbones. The EViT operation itself remains
+parameter-free: at each `drop_locs` block, the model computes the normal
+class-token attention, keeps the most attentive spatial patch tokens, optionally
+fuses inattentive patches into one token, and runs the MLP on the reorganized
+sequence. Prefix tokens (CLS/registers) are always kept.
+
+### Parameters
+
+| Argument | Description |
+|---|---|
+| `backbone` | Raw timm model from `get_model_from_name`. |
+| `adapter` | `ThunderBackboneAdapter` for the same backbone. |
+| `n_classes` | Number of output classes. |
+| `base_keep_rate` | Native EViT per-shrink keep rate. |
+| `drop_locs` | Transformer block indices where EViT token reorganization is applied. |
+| `fuse_token` | Whether to fuse inattentive tokens into one extra token. |
+| `lora_r`, `lora_alpha` | LoRA hyperparameters for blocks affected by EViT. |
+| `dropout` | Classification head dropout. |
+
+Use it through:
+
+```bash
+python scripts/finetune_pruned.py \
+    --pruning-method evit \
+    --model-name uni \
+    --dataset-name crc \
+    --base-data-folder /path/to/thunder/data \
+    --evit-drop-loc 3,6,9 \
+    --evit-base-keep-rate 0.7 \
+    --evit-fuse-token
+```
+
+---
+
 ## `FrozenPrunedLinearProbe`
 
 ```python

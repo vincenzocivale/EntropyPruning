@@ -16,7 +16,9 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, grad_norm, save_results
 from src.models import (AttentionForecaster, GenericLoRAWithForecasterPruning,
-                        LoRAWithCroprPruning, ThunderBackboneAdapter, STRATEGIES)
+                        LoRAWithCroprPruning, LoRAWithEViTPruning,
+                        ThunderBackboneAdapter, STRATEGIES,
+                        adjust_evit_keep_rate, parse_evit_drop_locs)
 from src.data.thunder_loaders import build_thunder_loaders
 from src.evaluation import evaluate
 
@@ -31,8 +33,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--pruning-method", type=str, default="eaf",
-                        choices=["eaf", "cropr"],
-                        help="Patch pruning method: EAF forecaster or Cropr auxiliary heads.")
+                        choices=["eaf", "cropr", "evit"],
+                        help="Patch pruning method: EAF forecaster, Cropr auxiliary heads, or EViT token reorganization.")
     parser.add_argument("--prune-layer", type=int, default=2)
     parser.add_argument("--keep-ratio", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=20)
@@ -69,6 +71,17 @@ def main():
     parser.add_argument("--cropr-no-mlp", action="store_true",
                         help="Disable the MLP in Cropr auxiliary scorer heads.")
     parser.add_argument("--cropr-mlp-ratio", type=float, default=4.0)
+    parser.add_argument("--evit-drop-loc", type=str, default="3,6,9",
+                        help="Comma-separated EViT block indices where token reorganization is applied.")
+    parser.add_argument("--evit-base-keep-rate", type=float, default=None,
+                        help="EViT per-shrink keep rate. Defaults to --keep-ratio for convenience.")
+    parser.add_argument("--evit-fuse-token", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Fuse inattentive EViT tokens into one extra token.")
+    parser.add_argument("--evit-shrink-start-epoch", type=int, default=10,
+                        help="Epoch where gradual EViT shrinking starts.")
+    parser.add_argument("--evit-shrink-epochs", type=int, default=0,
+                        help="Number of epochs used to linearly shrink from 1.0 to the base keep rate.")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -103,10 +116,17 @@ def main():
     if args.pruning_method == "eaf":
         run_name = (f"{args.model_name}_{args.dataset_name}_eaf"
                     f"_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}")
-    else:
+    elif args.pruning_method == "cropr":
         rate_tag = args.cropr_pruning_rate if args.cropr_pruning_rate is not None else "auto"
         run_name = (f"{args.model_name}_{args.dataset_name}_cropr"
                     f"_rate{rate_tag}_keep{int(args.keep_ratio * 100)}")
+    else:
+        evit_base_keep_rate = args.evit_base_keep_rate or args.keep_ratio
+        drop_tag = "-".join(str(x) for x in parse_evit_drop_locs(args.evit_drop_loc, adapter.n_blocks))
+        fuse_tag = "fuse" if args.evit_fuse_token else "nofuse"
+        run_name = (f"{args.model_name}_{args.dataset_name}_evit"
+                    f"_drop{drop_tag}_basekeep{int(evit_base_keep_rate * 100)}"
+                    f"_{fuse_tag}")
     use_wandb = args.wandb_project is not None
     if use_wandb:
         tags = [
@@ -144,7 +164,7 @@ def main():
             backbone=raw_backbone, adapter=adapter, n_classes=n_classes,
             forecaster=forecaster, prune_layer=args.prune_layer, keep_ratio=args.keep_ratio,
         ).to(device)
-    else:
+    elif args.pruning_method == "cropr":
         print("Using Cropr pruning: no EAF forecaster checkpoint is required.")
         model = LoRAWithCroprPruning(
             backbone=raw_backbone,
@@ -163,6 +183,20 @@ def main():
             mlp_ratio=args.cropr_mlp_ratio,
         ).to(device)
         print(f"Cropr schedule: layers={model.prune_layers} remove={model.cropr_schedule}")
+    else:
+        evit_drop_locs = parse_evit_drop_locs(args.evit_drop_loc, adapter.n_blocks)
+        evit_base_keep_rate = args.evit_base_keep_rate or args.keep_ratio
+        print("Using EViT pruning: no EAF forecaster checkpoint is required.")
+        model = LoRAWithEViTPruning(
+            backbone=raw_backbone,
+            adapter=adapter,
+            n_classes=n_classes,
+            base_keep_rate=evit_base_keep_rate,
+            drop_locs=evit_drop_locs,
+            fuse_token=args.evit_fuse_token,
+        ).to(device)
+        print(f"EViT schedule: drop_locs={model.drop_locs} "
+              f"base_keep_rate={model.base_keep_rate} fuse_token={model.fuse_token}")
     if Path(classifier_ckpt).exists():
         missing, unexpected = model.load_state_dict(
             torch.load(classifier_ckpt, map_location=device), strict=False)
@@ -172,6 +206,8 @@ def main():
               f"starting from pretrained backbone + freshly initialized head "
               f"(unsupervised EAF flow, no Phase 1 required).")
 
+    if args.pruning_method == "evit":
+        model.set_keep_rate(model.base_keep_rate)
     pre = evaluate(model, val_loader, device, args.far_threshold)
     print(f"\nPre fine-tuning val: acc={pre['acc']:.3f}  f1={pre['f1_macro']:.3f}")
     if use_wandb:
@@ -209,6 +245,15 @@ def main():
 
         for imgs, labels in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1}"):
             imgs, labels = imgs.to(device), labels.to(device)
+            if args.pruning_method == "evit":
+                model.set_keep_rate(adjust_evit_keep_rate(
+                    epoch=epoch,
+                    step_in_epoch=len(all_preds),
+                    steps_per_epoch=len(train_loader),
+                    base_keep_rate=model.base_keep_rate,
+                    shrink_start_epoch=args.evit_shrink_start_epoch,
+                    shrink_epochs=args.evit_shrink_epochs,
+                ))
 
             with autocast("cuda"):
                 outputs = model(imgs)
@@ -235,6 +280,8 @@ def main():
         all_labels_np = torch.cat(all_labels_ep).numpy()
         train_acc = (all_preds_np == all_labels_np).mean()
 
+        if args.pruning_method == "evit":
+            model.set_keep_rate(model.base_keep_rate)
         val_m = evaluate(model, val_loader, device, args.far_threshold)
 
         row = {
@@ -276,6 +323,8 @@ def main():
     # --- Test evaluation ---
     model.load_state_dict(torch.load(output_dir / ckpt_name, map_location=device))
     model.eval()
+    if args.pruning_method == "evit":
+        model.set_keep_rate(model.base_keep_rate)
     test_m = evaluate(model, test_loader, device, args.far_threshold)
 
     print(f"\n-- Test --  acc={test_m['acc']:.3f}  f1={test_m['f1_macro']:.3f}  "
@@ -302,6 +351,14 @@ def main():
             "cropr_prune_layers": model.prune_layers,
             "cropr_schedule": model.cropr_schedule,
             "cropr_llf": model.llf,
+        })
+    if hasattr(model, "drop_locs"):
+        results.update({
+            "evit_drop_locs": model.drop_locs,
+            "evit_base_keep_rate": model.base_keep_rate,
+            "evit_fuse_token": model.fuse_token,
+            "evit_shrink_start_epoch": args.evit_shrink_start_epoch,
+            "evit_shrink_epochs": args.evit_shrink_epochs,
         })
     path = save_results(output_dir / f"results_{run_name}.json", results)
     print(f"Results saved to: {path}")
