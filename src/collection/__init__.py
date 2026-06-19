@@ -1,2 +1,3 @@
 from .extract_features import collect_and_save_dataset
 from .unsupervised_cache import build_attention_cache, build_frozen_model, cache_is_valid
+from .distill_cache import build_distill_cache, distill_cache_is_valid

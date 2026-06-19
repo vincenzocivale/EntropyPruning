@@ -131,6 +131,8 @@ Three classes share the same pruning mechanism:
 
 **`DistilledPrunedBackbone`** — Phase 3, Approach 3. No head — `forward(x)` returns the CLS embedding. LoRA adapters are scoped to blocks strictly after `prune_layer` only (`post_prune_lora_targets`), since earlier blocks are identical between the pruned student and the frozen, unpruned teacher. Trained with an MSE + cosine-distance loss against the teacher's CLS token; no labels involved, so the same checkpoint transfers across datasets. Call `model.backbone.merge_and_unload()` once after training to fold LoRA into the base weights, producing a plain backbone consumable by `FrozenPrunedLinearProbe`.
 
+`forward_from_seq(seq, return_tokens)` is the training-time entry point: it resumes the pruning logic directly from a cached, unpruned `blocks[prune_layer]` output (`seq`) instead of recomputing it via `forward`'s live hook — see "HDF5 cache format (Phase 3)" below. `forward(x, ...)` itself is unchanged and still useful standalone (e.g. quick sanity checks on a few images without a cache).
+
 Pruning forward pass (shared logic):
 ```
 x (B, N_total, D)
@@ -165,7 +167,9 @@ Phase 1:  build_classifier(strategy, backbone, adapter, n_classes)
 Phase 2:  collect_and_save_dataset → HDF5 cache → H5ForecastDataset → forecaster training
 Phase 3 (1): FrozenPrunedLinearProbe(backbone, adapter, forecaster, n_classes, layers_source, keep_ratio)
 Phase 3 (2): GenericLoRAWithForecasterPruning(backbone, adapter, forecaster, prune_layer, keep_ratio)
-Phase 3 (3): DistilledPrunedBackbone(backbone, adapter, forecaster, prune_layer, keep_ratio)
+Phase 3 (3): build_distill_cache → HDF5 cache → DistillH5Dataset
+             → DistilledPrunedBackbone(backbone, adapter, forecaster, prune_layer, keep_ratio)
+             → forward_from_seq(seq_prune) trained against (teacher_cls, teacher_patches)
              → merge_and_unload() → FrozenPrunedLinearProbe(...) per dataset
 ```
 
@@ -186,6 +190,24 @@ Register tokens are excluded — only spatial patch tokens are stored.
 A single cache file can hold embeddings from multiple source layers (e.g. `emb_layer1` through `emb_layer5`), allowing the same HDF5 to be reused for experiments with different `layers_source` configurations without re-extraction.
 
 When `H5ForecastDataset` is given a list of source layers, it concatenates their embeddings along the feature dimension: the returned `emb` tensor has shape `(P, len(layers_source) × D)`. The forecaster must be initialised with the matching `embed_dim`.
+
+---
+
+## HDF5 cache format (Phase 3, Approach 3)
+
+Built by `src/collection/distill_cache.py::build_distill_cache` (one call per dataset; `distill_pruned.py` calls it automatically, `scripts/build_distill_cache.py` does it standalone). Rationale: the blocks up to and including `prune_layer` are frozen and identical between the teacher and the student, and the teacher itself never changes — so for a fixed image their output is constant for the whole training run. Caching it once removes both the teacher's full forward pass and the student's redundant frozen-prefix forward pass from every training step; only the LoRA blocks after `prune_layer` (the ones actually being trained) run live, on the already-pruned sequence.
+
+```
+{split}/
+    labels              (N,)                          int32
+    seq_prune           (N, num_prefix + P, D)         float16   — raw output of blocks[prune_layer], pre-pruning
+    teacher_cls         (N, D)                         float16   — teacher's own final CLS token (full, unpruned forward)
+    teacher_patches     (N, P, D)                      float16   — teacher's own final patch tokens (full, unpruned forward)
+```
+
+Where `P = adapter.n_patches`, `D = adapter.embed_dim`, `num_prefix = adapter.num_prefix_tokens`.
+
+`DistillH5Dataset`/`MultiDistillH5Dataset` (`src/data/h5_dataset.py`) load this cache the same way `H5ForecastDataset`/`MultiH5ForecastDataset` load the Phase 2 cache, including `BlockShuffleH5Dataset` support for the train split. `DistilledPrunedBackbone.forward_from_seq(seq_prune)` consumes `seq_prune` directly: it scores/prunes with the forecaster, runs only `blocks[prune_layer + 1:]` + the final norm, and returns the same `{features, cls, tokens, kept_indices}` dict as `forward(x, return_tokens=True)`. `teacher_cls`/`teacher_patches` are used as-is as the distillation targets (`teacher_patches` is gathered at `kept_indices` to match the student's surviving tokens).
 
 ---
 

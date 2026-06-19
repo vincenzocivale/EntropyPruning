@@ -402,7 +402,8 @@ che lo stesso backbone, frozen e senza pruning, avrebbe prodotto (`DistilledPrun
 sopravvissuti allo student con i token teacher corrispondenti agli stessi indici originali. Due termini
 ausiliari confrontano il CLS con cosine distance e la magnitudine del CLS con SmoothL1. Nessuna label,
 nessuna testa di classificazione: il corpus è l'unione di più dataset THUNDER, esattamente come nello
-Step 1/2a.
+Step 1/2a. Prima del training lo script costruisce (o riusa) una cache HDF5 per dataset con le immagini —
+vedi la nota costo più sotto.
 
 ```bash
 THUNDER_BASE_DATA_FOLDER=/path/to/thunder-tiles \
@@ -425,7 +426,7 @@ Argomenti principali:
 
 | Flag | Default | Note |
 |---|---|---|
-| `--datasets` | i 16 dataset THUNDER | corpus di immagini per la distillazione (nessuna label usata) |
+| `--datasets` | i 16 dataset THUNDER | corpus di immagini per costruire la cache di distillazione (nessuna label usata) |
 | `--forecaster-ckpt` | forecaster universale in `--cache-dir` | deve corrispondere a `--prune-layer` come source layer |
 | `--token-weight`, `--cls-weight`, `--mag-weight` | `1.0`, `0.5`, `0.1` | pesi di token cosine, CLS cosine e SmoothL1 sulle norme CLS |
 | `--keep-ratio-min` | unset | se impostato, campiona a ogni step un keep ratio uniforme in `[keep-ratio-min, keep-ratio]`; la validazione resta a `--keep-ratio` |
@@ -464,10 +465,16 @@ Le righe finiscono nello stesso `results/linear_probe_pruned/{model}.csv` dello 
 `backbone_variant=distilled` invece di `pretrained` — permette il confronto diretto Approccio 1 vs
 Approccio 3 a parità di forecaster/keep_ratio/dataset.
 
-> **Nota costo:** lo script tiene in memoria due copie del backbone (teacher frozen + student con LoRA),
-> e ricalcola i blocchi pre-pruning due volte per batch (una per il teacher, una per lo student) — nessuna
-> cache HDF5 è usata qui poiché i blocchi dopo `--prune-layer` cambiano ad ogni step. Per backbone molto
-> grandi, riduci `--batch-size`.
+> **Nota costo:** i blocchi fino a `--prune-layer` sono frozen e identici tra teacher e student (nessun
+> LoRA lì), e il teacher è interamente frozen — quindi il loro output è costante per tutta la run. Lo
+> script costruisce/riusa automaticamente una cache HDF5 per dataset (`{dataset}_{model}_distill_prune{L}.h5`
+> in `--cache-dir`, vedi `src/collection/distill_cache.py` e, per pre-costruirla a mano,
+> `scripts/build_distill_cache.py`) contenente l'output grezzo di `blocks[--prune-layer]` più il CLS/patch
+> token finale del teacher. Il training legge solo questi tensori: niente immagini, niente forward del
+> backbone congelato o del teacher — ogni step esegue solo i blocchi LoRA dopo `--prune-layer`, sulla
+> sequenza già potata. `--cache-batch-size`/`--cache-num-workers` controllano solo la passata di estrazione
+> una tantum; per backbone molto grandi, riduci `--batch-size` (training) se la memoria è il collo di
+> bottiglia.
 
 ### Step 4 — Confronto per-dataset vs universale (spider plot + CSV)
 

@@ -352,25 +352,33 @@ Only blocks strictly after `prune_layer` carry LoRA adapters (see `post_prune_lo
 
 Returns the exact peft `target_modules` list (`"blocks.{i}.attn.qkv"`, `.attn.proj`, `.mlp.fc1`, `.mlp.fc2"` for `i > prune_layer`). Exact names rather than bare suffixes (`"qkv"`, `"proj"`, ...) so block 5 is never matched by a rule meant for block 15 — peft checks list membership/exact-suffix match, see `peft.tuners.tuners_utils.check_target_module_exists`.
 
+### `forward_from_seq(seq, return_tokens=True)`
+
+Training-time entry point used by `scripts/distill_pruned.py`. `seq` is the cached, *unpruned* sequence at the output of `blocks[prune_layer]` (prefix + all patch tokens) — exactly the tensor `forward`'s hook would receive as `output`, and exactly what `src/collection/distill_cache.py::build_distill_cache` extracts and stores as `seq_prune`. It scores/prunes with the (frozen) forecaster and runs only `blocks[prune_layer + 1:]` + the final norm, returning the same `{features, cls, tokens, kept_indices}` dict as `forward(x, return_tokens=True)`.
+
+Because `blocks[:prune_layer + 1]` are frozen and identical between teacher and student, `seq` is constant for a given image for the whole training run — extracting it once (per image, not per step) and training exclusively from `forward_from_seq` is what lets `distill_pruned.py` skip both the teacher's forward pass and the student's frozen-prefix forward pass at training time. `forward(x, ...)` (image-based) is unchanged and still works standalone.
+
 ### Training recipe (`scripts/distill_pruned.py`)
 
 ```python
-teacher = raw_backbone_copy.to(device).eval()  # untouched, frozen
-for p in teacher.parameters():
-    p.requires_grad_(False)
+# One-time, per dataset (build_distill_cache, see src/collection/distill_cache.py):
+#   hook blocks[prune_layer] to capture seq_prune (= its raw output) while the
+#   forward pass continues uninterrupted to the teacher's own final CLS/patch
+#   tokens (teacher_cls, teacher_patches) -- one forward pass yields both.
+# Saved to HDF5; loaded at training time via DistillH5Dataset/MultiDistillH5Dataset.
 
 student = DistilledPrunedBackbone(
-    backbone=another_raw_backbone_copy, adapter=adapter, forecaster=forecaster,
+    backbone=raw_backbone, adapter=adapter, forecaster=forecaster,
     prune_layer=2, keep_ratio=0.1,
 ).to(device)
 
-teacher_cls = teacher.forward_features(imgs)[:, 0]          # no_grad
-student_cls = student(imgs)
-loss = mse_weight * F.mse_loss(student_cls, teacher_cls) \
-     + cosine_weight * (1 - F.cosine_similarity(student_cls, teacher_cls, dim=-1).mean())
+student_out = student.forward_from_seq(seq_prune, return_tokens=True)   # no images, no teacher forward
+teacher_tokens = teacher_patches.gather(1, student_out["kept_indices"].unsqueeze(-1).expand(-1, -1, D))
+loss = token_weight * (1 - F.cosine_similarity(student_out["tokens"], teacher_tokens, dim=-1)).mean() \
+     + cls_weight * (1 - F.cosine_similarity(student_out["cls"], teacher_cls, dim=-1)).mean()
 ```
 
-Teacher and student must be **separate backbone instances** (two calls to `get_model_from_name`) — reusing one object for both would mean the "teacher" forward also runs through the (partially trained) LoRA weights once the first optimizer step lands, defeating the purpose of a fixed target.
+The teacher backbone itself is only needed for the one-time cache build, not for training — `distill_pruned.py` frees it (`del teacher; torch.cuda.empty_cache()`) right after the cache is built/reused, before constructing the student.
 
 ### Merging after training
 

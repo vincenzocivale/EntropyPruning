@@ -88,3 +88,49 @@ def test_merge_and_unload_removes_lora():
     assert isinstance(merged.blocks[PRUNE_LAYER + 1].attn.qkv, nn.Linear)
     assert not isinstance(merged.blocks[PRUNE_LAYER + 1].attn.qkv, LoraLinear)
     assert not any("lora_A" in k or "lora_B" in k for k in merged.state_dict())
+
+
+def test_forward_from_seq_matches_forward_on_equivalent_input():
+    """forward_from_seq, given the exact sequence forward()'s pruning hook
+    would see, must reproduce forward(..., return_tokens=True) bit-for-bit --
+    it is the same computation, just resumed from a cached intermediate
+    instead of re-deriving it via a live hook."""
+    student, _ = _build_student()
+    student.eval()
+    x = torch.randn(B, NUM_PREFIX + N_PATCHES, D)
+
+    expected = student(x, return_tokens=True)
+
+    captured = {}
+    handle = student.raw_backbone.blocks[PRUNE_LAYER].register_forward_hook(
+        lambda module, input, output: captured.setdefault("seq", output)
+    )
+    student.raw_backbone.forward_features(x)
+    handle.remove()
+
+    actual = student.forward_from_seq(captured["seq"], return_tokens=True)
+
+    assert torch.equal(actual["kept_indices"], expected["kept_indices"])
+    assert torch.allclose(actual["cls"], expected["cls"], atol=1e-6)
+    assert torch.allclose(actual["tokens"], expected["tokens"], atol=1e-6)
+    assert torch.allclose(actual["features"], expected["features"], atol=1e-6)
+
+
+def test_forward_from_seq_runs_only_post_prune_blocks_and_keeps_grad():
+    student, _ = _build_student()
+    seq = torch.randn(B, NUM_PREFIX + N_PATCHES, D, requires_grad=True)
+
+    out = student.forward_from_seq(seq, return_tokens=True)
+    k = int(N_PATCHES * student.keep_ratio)
+
+    assert out["cls"].shape == (B, D)
+    assert out["tokens"].shape == (B, k, D)
+    assert out["kept_indices"].shape == (B, k)
+
+    out["cls"].pow(2).mean().backward()
+    assert seq.grad is not None
+    assert all(
+        p.grad is not None
+        for p in student.backbone.parameters()
+        if p.requires_grad
+    )

@@ -265,22 +265,25 @@ class DistilledPrunedBackbone(nn.Module):
         """The underlying timm VisionTransformer (unwrapped from peft)."""
         return self.backbone.model
 
+    def _prune_select(self, patches):
+        """Score spatial patch tokens with the frozen forecaster and return
+        the indices of the top ``keep_ratio`` fraction (shared by ``forward``
+        and ``forward_from_seq`` so both prune identically)."""
+        with torch.no_grad():
+            scores = self.forecaster(patches)
+        k = max(1, int(patches.shape[1] * self.keep_ratio))
+        return scores.topk(k, dim=-1).indices
+
     def forward(self, x, return_tokens: bool = False):
         num_prefix = self.num_prefix
-        forecaster = self.forecaster
-        keep_ratio = self.keep_ratio
         kept_idx = None
 
         def _prune(module, input, output):
             nonlocal kept_idx
             prefix = output[:, :num_prefix]
             patches = output[:, num_prefix:]
-            with torch.no_grad():
-                scores = forecaster(patches)
-            k = max(1, int(patches.shape[1] * keep_ratio))
-            idx = scores.topk(k, dim=-1).indices
-            kept_idx = idx
-            kept = patches.gather(1, idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
+            kept_idx = self._prune_select(patches)
+            kept = patches.gather(1, kept_idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
             return torch.cat([prefix, kept], dim=1)
 
         handle = self.raw_backbone.blocks[self.prune_layer].register_forward_hook(_prune)
@@ -292,6 +295,39 @@ class DistilledPrunedBackbone(nn.Module):
             return features[:, 0]
         if kept_idx is None:
             raise RuntimeError("Pruning hook did not run; check prune_layer/backbone blocks.")
+        return {
+            "features": features,
+            "cls": features[:, 0],
+            "tokens": features[:, num_prefix:],
+            "kept_indices": kept_idx,
+        }
+
+    def forward_from_seq(self, seq, return_tokens: bool = True):
+        """Continue the forward pass from a cached, *unpruned* sequence at
+        the output of ``blocks[prune_layer]`` -- i.e. exactly the tensor
+        ``forward``'s hook receives as ``output`` (prefix tokens + all patch
+        tokens, pre-pruning).
+
+        Skips ``patch_embed`` and every block up to and including
+        ``prune_layer``: those are frozen and produce byte-identical output
+        every call (same input image, same untouched weights), so a cache
+        built once -- e.g. via ``src.collection.build_distill_cache`` --
+        makes re-running them on every training step unnecessary. Only the
+        post-``prune_layer`` LoRA blocks actually being trained run here.
+        """
+        num_prefix = self.num_prefix
+        prefix = seq[:, :num_prefix]
+        patches = seq[:, num_prefix:]
+        kept_idx = self._prune_select(patches)
+        kept = patches.gather(1, kept_idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1]))
+        x = torch.cat([prefix, kept], dim=1)
+
+        for blk in self.raw_backbone.blocks[self.prune_layer + 1:]:
+            x = blk(x)
+        features = self.raw_backbone.norm(x)
+
+        if not return_tokens:
+            return features[:, 0]
         return {
             "features": features,
             "cls": features[:, 0],

@@ -62,6 +62,77 @@ class H5ForecastDataset(Dataset):
         return emb, target, label
 
 
+class DistillH5Dataset(Dataset):
+    """Lazy-loading dataset from a Phase 3 distillation HDF5 cache (see
+    ``src.collection.build_distill_cache``).
+
+    Each row holds the cached, *unpruned* sequence at ``blocks[prune_layer]``
+    (``seq_prune``) plus the frozen model's own final CLS/patch tokens
+    (``teacher_cls``/``teacher_patches``) -- everything ``DistilledPrunedBackbone
+    .forward_from_seq`` and the distillation loss need, with no image
+    loading or backbone forward pass required at training time.
+    """
+
+    def __init__(self, h5_path, split):
+        self.h5_path = str(h5_path)
+        self.split = split
+        self._file = None
+
+        with h5py.File(h5_path, 'r') as f:
+            self.length = len(f[split]["labels"])
+
+    def _get_file(self):
+        if self._file is None:
+            self._file = h5py.File(self.h5_path, 'r')
+        return self._file
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        f = self._get_file()
+        grp = f[self.split]
+        seq_prune = torch.from_numpy(grp["seq_prune"][idx]).float()
+        teacher_cls = torch.from_numpy(grp["teacher_cls"][idx]).float()
+        teacher_patches = torch.from_numpy(grp["teacher_patches"][idx]).float()
+        return seq_prune, teacher_cls, teacher_patches
+
+    def read_block(self, start, end):
+        """Read rows ``[start, end)`` via one contiguous HDF5 slice per
+        dataset -- see ``H5ForecastDataset.read_block``; used the same way
+        by ``BlockShuffleH5Dataset``."""
+        f = self._get_file()
+        grp = f[self.split]
+        seq_prune = torch.from_numpy(grp["seq_prune"][start:end]).float()
+        teacher_cls = torch.from_numpy(grp["teacher_cls"][start:end]).float()
+        teacher_patches = torch.from_numpy(grp["teacher_patches"][start:end]).float()
+        return seq_prune, teacher_cls, teacher_patches
+
+
+class MultiDistillH5Dataset(Dataset):
+    """Concatenation of per-dataset ``DistillH5Dataset`` caches, for training
+    one dataset-agnostic distilled backbone -- see ``MultiH5ForecastDataset``.
+
+    ``__getitem__`` returns ``(seq_prune, teacher_cls, teacher_patches,
+    dataset_idx)``, where ``dataset_idx`` indexes into ``self.dataset_names``.
+    """
+
+    def __init__(self, cache_paths, split):
+        self.dataset_names = list(cache_paths.keys())
+        self.datasets = [DistillH5Dataset(path, split) for path in cache_paths.values()]
+        lengths = [len(d) for d in self.datasets]
+        self._offsets = np.cumsum([0] + lengths)
+
+    def __len__(self):
+        return int(self._offsets[-1])
+
+    def __getitem__(self, idx):
+        ds_idx = int(np.searchsorted(self._offsets, idx, side="right") - 1)
+        local_idx = idx - int(self._offsets[ds_idx])
+        seq_prune, teacher_cls, teacher_patches = self.datasets[ds_idx][local_idx]
+        return seq_prune, teacher_cls, teacher_patches, ds_idx
+
+
 class MultiH5ForecastDataset(Dataset):
     """Concatenation of per-dataset ``H5ForecastDataset`` caches.
 
@@ -124,9 +195,14 @@ class BlockShuffleH5Dataset(IterableDataset):
     Net effect: ``batch_size`` random seeks/batch become
     ``batch_size // micro_block_size`` sequential reads/batch.
 
-    Wraps either a ``MultiH5ForecastDataset`` (yields 4-tuples, matching
-    its own ``__getitem__``) or a plain ``H5ForecastDataset`` (yields
-    3-tuples).
+    Wraps any dataset whose sub-datasets implement ``read_block(start, end)``
+    returning a tuple of equal-length tensors -- ``H5ForecastDataset``
+    (``emb, target, label``) and ``DistillH5Dataset`` (``seq_prune,
+    teacher_cls, teacher_patches``) both qualify. Yields a tuple of the same
+    arity as ``read_block``, plus a trailing ``ds_idx`` tensor when wrapping
+    a multi-dataset (``MultiH5ForecastDataset``/``MultiDistillH5Dataset``,
+    detected via a ``.datasets`` attribute) -- matching each one's own
+    ``__getitem__`` convention.
 
     Important: pass ``persistent_workers=False`` to the wrapping
     ``DataLoader``. ``set_epoch`` mutates this object in the main process;
@@ -179,22 +255,22 @@ class BlockShuffleH5Dataset(IterableDataset):
             group_ids = order[i:i + n_per_batch]
             if len(group_ids) == 0 or (self.drop_last and len(group_ids) < n_per_batch):
                 break
-            embs, targets, labels, ds_idxs = [], [], [], []
+            collected, ds_idxs = None, []
             for bi in group_ids:
                 ds_idx, start, end = self._microblocks[bi]
-                emb, target, label = self.datasets[ds_idx].read_block(start, end)
-                embs.append(emb)
-                targets.append(target)
-                labels.append(label)
+                block = self.datasets[ds_idx].read_block(start, end)
+                if collected is None:
+                    collected = [[] for _ in block]
+                for parts, tensor in zip(collected, block):
+                    parts.append(tensor)
                 if self._is_multi:
                     ds_idxs.append(torch.full((end - start,), ds_idx, dtype=torch.long))
 
-            emb = torch.cat(embs, dim=0)
-            target = torch.cat(targets, dim=0)
-            label = torch.cat(labels, dim=0)
-            perm = torch.randperm(emb.shape[0])
+            tensors = [torch.cat(parts, dim=0) for parts in collected]
+            perm = torch.randperm(tensors[0].shape[0])
+            tensors = [t[perm] for t in tensors]
             if self._is_multi:
                 ds_idx_t = torch.cat(ds_idxs, dim=0)
-                yield emb[perm], target[perm], label[perm], ds_idx_t[perm]
+                yield (*tensors, ds_idx_t[perm])
             else:
-                yield emb[perm], target[perm], label[perm]
+                yield tuple(tensors)

@@ -9,6 +9,15 @@ Thunder datasets. The result is a single backbone checkpoint reusable across
 every downstream dataset via linear probing (see
 scripts/linear_probe_pruned_eaf.py --backbone-ckpt).
 
+Training reads a per-dataset HDF5 feature cache (built automatically below,
+or ahead of time with scripts/build_distill_cache.py) instead of raw images.
+The blocks up to and including ``--prune-layer`` are frozen and identical
+between the teacher and the student, and the teacher itself never changes --
+so for a fixed image their output is constant for the whole run. The cache
+stores that output once; every training step then runs only the LoRA blocks
+actually being trained, on the already-pruned token sequence. See
+src/collection/distill_cache.py for the extraction details.
+
 Usage example
 -------------
 python scripts/distill_pruned.py \\
@@ -31,14 +40,19 @@ python scripts/linear_probe_pruned_eaf.py \\
     --backbone-tag distilled
 """
 
+import os
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 import argparse
 import sys
 from pathlib import Path
 
 import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import wandb
 
@@ -48,7 +62,8 @@ from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, grad_norm, save_results
 from src.models import DistilledPrunedBackbone, ThunderBackboneAdapter, load_forecaster
-from src.data import build_multi_dataset_loaders
+from src.data import MultiDistillH5Dataset, BlockShuffleH5Dataset
+from src.collection import build_distill_cache
 
 DEFAULT_DATASETS = [
     "bach", "bracs", "break_his", "ccrcc", "crc", "esca", "mhist", "patch_camelyon",
@@ -57,21 +72,18 @@ DEFAULT_DATASETS = [
 ]
 
 
-def _distill_forward(student, teacher, imgs):
-    """Shared forward pass: student/teacher outputs needed for both the
-    training loss and the eval metrics."""
-    with torch.no_grad():
-        teacher_features = teacher.forward_features(imgs)
-    student_out = student(imgs, return_tokens=True)
-
-    teacher_cls = teacher_features[:, 0]
-    teacher_patches = teacher_features[:, student.num_prefix:]
+def _distill_forward(student, seq_prune, teacher_patches):
+    """Shared forward pass: student outputs, plus the teacher tokens at the
+    indices the student kept -- both the cached prune-layer sequence and the
+    teacher targets come straight from the feature cache, so no backbone
+    forward pass (frozen prefix or teacher) happens here."""
+    student_out = student.forward_from_seq(seq_prune, return_tokens=True)
     kept_idx = student_out["kept_indices"]
     teacher_tokens = teacher_patches.gather(
         1,
         kept_idx.unsqueeze(-1).expand(-1, -1, teacher_patches.shape[-1]),
     )
-    return student_out, teacher_cls, teacher_tokens
+    return student_out, teacher_tokens
 
 
 def _distill_losses(student_out, teacher_cls, teacher_tokens, token_weight, cls_weight, mag_weight):
@@ -96,8 +108,8 @@ def _distill_losses(student_out, teacher_cls, teacher_tokens, token_weight, cls_
     }
 
 
-def _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight):
-    student_out, teacher_cls, teacher_tokens = _distill_forward(student, teacher, imgs)
+def _distill_step(student, seq_prune, teacher_cls, teacher_patches, token_weight, cls_weight, mag_weight):
+    student_out, teacher_tokens = _distill_forward(student, seq_prune, teacher_patches)
     return _distill_losses(student_out, teacher_cls, teacher_tokens, token_weight, cls_weight, mag_weight)
 
 
@@ -142,16 +154,18 @@ def _cka_linear(student_feats, teacher_feats):
 
 
 @torch.no_grad()
-def _evaluate(student, teacher, loader, device, token_weight, cls_weight, mag_weight,
+def _evaluate(student, loader, device, token_weight, cls_weight, mag_weight,
               retrieval_k=5, desc="eval"):
     student.eval()
     total, n_batches = {}, 0
     retrieval_total, retrieval_batches = 0.0, 0
     student_cls_cpu, teacher_cls_cpu = [], []
-    for imgs, _ in tqdm(loader, leave=False, desc=desc):
-        imgs = imgs.to(device)
+    for seq_prune, teacher_cls, teacher_patches, _ in tqdm(loader, leave=False, desc=desc):
+        seq_prune = seq_prune.to(device)
+        teacher_cls = teacher_cls.to(device)
+        teacher_patches = teacher_patches.to(device)
         with autocast("cuda"):
-            student_out, teacher_cls, teacher_tokens = _distill_forward(student, teacher, imgs)
+            student_out, teacher_tokens = _distill_forward(student, seq_prune, teacher_patches)
             batch_m = _distill_losses(student_out, teacher_cls, teacher_tokens,
                                        token_weight, cls_weight, mag_weight)
             retrieval_recall = _retrieval_recall_at_k(student_out["cls"], teacher_cls, retrieval_k)
@@ -175,6 +189,27 @@ def _evaluate(student, teacher, loader, device, token_weight, cls_weight, mag_we
     return metrics
 
 
+def _build_caches(datasets, model_name, base_data_folder, cache_dir, prune_layer,
+                   teacher, adapter, transform, device, cache_batch_size, cache_num_workers,
+                   max_samples_per_split=None):
+    """Build/reuse the per-dataset distillation feature cache for every
+    dataset in ``datasets``. Datasets missing a data split are skipped."""
+    cache_paths = {}
+    for dataset_name in datasets:
+        split_path = Path(base_data_folder) / "data_splits" / f"{dataset_name}.json"
+        if not split_path.exists():
+            print(f"[{dataset_name}] SKIP: missing data split {split_path}")
+            continue
+        save_path = Path(cache_dir) / f"{dataset_name}_{model_name}_distill_prune{prune_layer}.h5"
+        build_distill_cache(
+            teacher, adapter, transform, dataset_name, base_data_folder, save_path, device,
+            prune_layer=prune_layer, batch_size=cache_batch_size, num_workers=cache_num_workers,
+            max_samples_per_split=max_samples_per_split,
+        )
+        cache_paths[dataset_name] = save_path
+    return cache_paths
+
+
 def main():
     parser = argparse.ArgumentParser(description="Phase 3: dataset-agnostic CLS distillation")
     parser.add_argument("--model-name", type=str, required=True)
@@ -185,7 +220,8 @@ def main():
                              "{cache-dir}/{model}_forecaster/forecaster_{model}_src{prune_layer:02d}"
                              "_attn{layer_target:02d}_universal.pt")
     parser.add_argument("--cache-dir", type=str, default="checkpoints/unsupervised",
-                        help="Used to resolve the default --forecaster-ckpt path.")
+                        help="Used to resolve the default --forecaster-ckpt path and to store/reuse "
+                             "the per-dataset distillation feature caches.")
     parser.add_argument("--forecaster-n-heads", type=int, default=4)
     parser.add_argument("--prune-layer", type=int, default=2)
     parser.add_argument("--keep-ratio", type=float, default=0.1)
@@ -207,6 +243,16 @@ def main():
                              "(must be < --batch-size).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--shuffle-block-size", type=int, default=32,
+                        help="Rows per contiguous on-disk micro-block for the train loader's "
+                             "block-shuffle (must divide --batch-size). Set to 1 to recover plain "
+                             "per-row shuffling.")
+    parser.add_argument("--cache-batch-size", type=int, default=64,
+                        help="Image batch size used only while building the feature cache.")
+    parser.add_argument("--cache-num-workers", type=int, default=4,
+                        help="DataLoader workers used only while building the feature cache.")
+    parser.add_argument("--max-samples-per-split", type=int, default=None,
+                        help="Debug cap on samples per split when building the cache.")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -237,6 +283,24 @@ def main():
     for p in teacher.parameters():
         p.requires_grad_(False)
 
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_paths = _build_caches(
+        args.datasets, args.model_name, args.base_data_folder, cache_dir, args.prune_layer,
+        teacher, adapter, transform, device,
+        args.cache_batch_size, args.cache_num_workers, args.max_samples_per_split,
+    )
+    if not cache_paths:
+        raise RuntimeError("No dataset caches available -- check --base-data-folder / --datasets.")
+    used_datasets = list(cache_paths.keys())
+    print(f"Corpus ({len(used_datasets)} datasets): {used_datasets}")
+
+    # The teacher and the student's frozen prefix are now fully captured in
+    # the cache -- free the teacher's weights before building the student.
+    del teacher, raw_teacher
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
     forecaster_ckpt = args.forecaster_ckpt or str(
         Path(args.cache_dir) / f"{args.model_name}_forecaster" /
         f"forecaster_{args.model_name}_src{args.prune_layer:02d}_attn{layer_target:02d}_universal.pt")
@@ -249,11 +313,23 @@ def main():
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
     ).to(device)
 
-    train_loader, val_loader, test_loader, used_datasets = build_multi_dataset_loaders(
-        args.datasets, args.base_data_folder, transform, args.batch_size, args.num_workers)
-    print(f"Corpus ({len(used_datasets)} datasets): {used_datasets}")
-    print(f"Samples: train={len(train_loader.dataset)} val={len(val_loader.dataset)} "
-          f"test={len(test_loader.dataset)}")
+    train_ds = MultiDistillH5Dataset(cache_paths, "train")
+    val_ds = MultiDistillH5Dataset(cache_paths, "val")
+    test_ds = MultiDistillH5Dataset(cache_paths, "test")
+    block_train_ds = BlockShuffleH5Dataset(
+        train_ds, batch_size=args.batch_size, micro_block_size=args.shuffle_block_size,
+        seed=args.seed, drop_last=True,
+    )
+    train_loader = DataLoader(
+        block_train_ds, batch_size=None, num_workers=args.num_workers,
+        pin_memory=True, persistent_workers=False,
+    )
+    eval_kw = dict(batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True,
+                   persistent_workers=(args.num_workers > 0))
+    val_loader = DataLoader(val_ds, shuffle=False, **eval_kw)
+    test_loader = DataLoader(test_ds, shuffle=False, **eval_kw)
+    print(f"Samples: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
+    print(f"Steps/epoch (approx, block-shuffled): {len(block_train_ds)}")
 
     output_dir = Path(args.output_dir) if args.output_dir else \
         Path(args.cache_dir) / f"{args.model_name}_distilled"
@@ -282,10 +358,13 @@ def main():
 
     for epoch in range(args.epochs):
         student.train()
+        block_train_ds.set_epoch(epoch)
         total, total_gnorm = {}, 0.
 
-        for imgs, _ in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1}"):
-            imgs = imgs.to(device)
+        for seq_prune, teacher_cls, teacher_patches, _ in tqdm(train_loader, leave=False, desc=f"Ep{epoch+1}"):
+            seq_prune = seq_prune.to(device)
+            teacher_cls = teacher_cls.to(device)
+            teacher_patches = teacher_patches.to(device)
             if args.keep_ratio_min is not None:
                 student.keep_ratio = (
                     args.keep_ratio_min
@@ -293,7 +372,7 @@ def main():
                 )
             with autocast("cuda"):
                 batch_m = _distill_step(
-                    student, teacher, imgs,
+                    student, seq_prune, teacher_cls, teacher_patches,
                     args.token_weight, args.cls_weight, args.mag_weight,
                 )
                 loss = batch_m["loss"]
@@ -310,7 +389,7 @@ def main():
 
         n_batches = len(train_loader)
         student.keep_ratio = args.keep_ratio
-        val_m = _evaluate(student, teacher, val_loader, device,
+        val_m = _evaluate(student, val_loader, device,
                            args.token_weight, args.cls_weight, args.mag_weight,
                            retrieval_k=args.retrieval_k, desc=f"val ep{epoch+1}")
 
@@ -368,7 +447,7 @@ def main():
     # --- Reload best checkpoint, merge LoRA into the base weights once, save ---
     student.load_state_dict(torch.load(lora_ckpt, map_location=device))
     student.eval()
-    test_m = _evaluate(student, teacher, test_loader, device,
+    test_m = _evaluate(student, test_loader, device,
                         args.token_weight, args.cls_weight, args.mag_weight,
                         retrieval_k=args.retrieval_k, desc="final test")
     print(f"\n-- Best checkpoint on test set -- loss={test_m['loss']:.4f}  "
