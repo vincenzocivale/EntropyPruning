@@ -57,7 +57,9 @@ DEFAULT_DATASETS = [
 ]
 
 
-def _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight):
+def _distill_forward(student, teacher, imgs):
+    """Shared forward pass: student/teacher outputs needed for both the
+    training loss and the eval metrics."""
     with torch.no_grad():
         teacher_features = teacher.forward_features(imgs)
     student_out = student(imgs, return_tokens=True)
@@ -69,7 +71,10 @@ def _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight):
         1,
         kept_idx.unsqueeze(-1).expand(-1, -1, teacher_patches.shape[-1]),
     )
+    return student_out, teacher_cls, teacher_tokens
 
+
+def _distill_losses(student_out, teacher_cls, teacher_tokens, token_weight, cls_weight, mag_weight):
     token_cos = F.cosine_similarity(student_out["tokens"], teacher_tokens, dim=-1)
     cls_cos = F.cosine_similarity(student_out["cls"], teacher_cls, dim=-1)
     student_norm = student_out["cls"].norm(dim=-1)
@@ -91,22 +96,83 @@ def _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight):
     }
 
 
+def _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight):
+    student_out, teacher_cls, teacher_tokens = _distill_forward(student, teacher, imgs)
+    return _distill_losses(student_out, teacher_cls, teacher_tokens, token_weight, cls_weight, mag_weight)
+
+
 def _accum(total, batch_m):
     for key, value in batch_m.items():
         total[key] = total.get(key, 0.0) + float(value.detach().item())
 
 
+def _retrieval_recall_at_k(student_cls, teacher_cls, k):
+    """In-batch top-k retrieval consistency: for each sample, the fraction of its
+    teacher-space top-k nearest neighbours (cosine, self excluded) also found
+    among its student-space top-k. The batch is the retrieval pool, so ``k``
+    must be < batch size -- this is a cheap per-step proxy, not a corpus-wide
+    retrieval eval."""
+    B = student_cls.shape[0]
+    k = min(k, B - 1)
+    if k < 1:
+        return None
+    s = F.normalize(student_cls.float(), dim=-1)
+    t = F.normalize(teacher_cls.float(), dim=-1)
+    sim_s = s @ s.T
+    sim_t = t @ t.T
+    eye = torch.eye(B, device=student_cls.device, dtype=torch.bool)
+    sim_s.masked_fill_(eye, float("-inf"))
+    sim_t.masked_fill_(eye, float("-inf"))
+    topk_s = sim_s.topk(k, dim=-1).indices
+    topk_t = sim_t.topk(k, dim=-1).indices
+    match = (topk_s.unsqueeze(-1) == topk_t.unsqueeze(1)).any(-1).float().sum(-1)
+    return (match / k).mean()
+
+
+def _cka_linear(student_feats, teacher_feats):
+    """Linear CKA between two (N, D) CLS feature matrices accumulated over a
+    full eval pass (centering and the Frobenius norms need the whole split,
+    not a single batch)."""
+    x = student_feats - student_feats.mean(dim=0, keepdim=True)
+    y = teacher_feats - teacher_feats.mean(dim=0, keepdim=True)
+    hsic = (x.T @ y).norm() ** 2
+    norm_x = (x.T @ x).norm()
+    norm_y = (y.T @ y).norm()
+    return (hsic / (norm_x * norm_y).clamp_min(1e-12)).item()
+
+
 @torch.no_grad()
-def _evaluate(student, teacher, loader, device, token_weight, cls_weight, mag_weight, desc="eval"):
+def _evaluate(student, teacher, loader, device, token_weight, cls_weight, mag_weight,
+              retrieval_k=5, desc="eval"):
     student.eval()
     total, n_batches = {}, 0
+    retrieval_total, retrieval_batches = 0.0, 0
+    student_cls_cpu, teacher_cls_cpu = [], []
     for imgs, _ in tqdm(loader, leave=False, desc=desc):
         imgs = imgs.to(device)
         with autocast("cuda"):
-            batch_m = _distill_step(student, teacher, imgs, token_weight, cls_weight, mag_weight)
-        _accum(total, batch_m)
+            student_out, teacher_cls, teacher_tokens = _distill_forward(student, teacher, imgs)
+            batch_m = _distill_losses(student_out, teacher_cls, teacher_tokens,
+                                       token_weight, cls_weight, mag_weight)
+            retrieval_recall = _retrieval_recall_at_k(student_out["cls"], teacher_cls, retrieval_k)
+
+        _accum(total, {
+            "loss": batch_m["loss"],
+            "token_cosine_sim": batch_m["token_cosine_sim"],
+            "cls_cosine_sim": batch_m["cls_cosine_sim"],
+            "cls_mag_rel_error": batch_m["cls_mag_rel_error"],
+        })
+        if retrieval_recall is not None:
+            retrieval_total += float(retrieval_recall.detach().item())
+            retrieval_batches += 1
+        student_cls_cpu.append(student_out["cls"].float().cpu())
+        teacher_cls_cpu.append(teacher_cls.float().cpu())
         n_batches += 1
-    return {key: value / n_batches for key, value in total.items()}
+
+    metrics = {key: value / n_batches for key, value in total.items()}
+    metrics["retrieval_recall_at_k"] = retrieval_total / max(retrieval_batches, 1)
+    metrics["cka_linear"] = _cka_linear(torch.cat(student_cls_cpu), torch.cat(teacher_cls_cpu))
+    return metrics
 
 
 def main():
@@ -136,6 +202,9 @@ def main():
     parser.add_argument("--keep-ratio-min", type=float, default=None,
                         help="If set, sample a training keep ratio uniformly in "
                              "[keep-ratio-min, keep-ratio] each step; validation uses keep-ratio.")
+    parser.add_argument("--retrieval-k", type=int, default=5,
+                        help="k for the in-batch retrieval-consistency recall@k eval metric "
+                             "(must be < --batch-size).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=10)
@@ -180,10 +249,11 @@ def main():
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
     ).to(device)
 
-    train_loader, val_loader, used_datasets = build_multi_dataset_loaders(
+    train_loader, val_loader, test_loader, used_datasets = build_multi_dataset_loaders(
         args.datasets, args.base_data_folder, transform, args.batch_size, args.num_workers)
     print(f"Corpus ({len(used_datasets)} datasets): {used_datasets}")
-    print(f"Samples: train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
+    print(f"Samples: train={len(train_loader.dataset)} val={len(val_loader.dataset)} "
+          f"test={len(test_loader.dataset)}")
 
     output_dir = Path(args.output_dir) if args.output_dir else \
         Path(args.cache_dir) / f"{args.model_name}_distilled"
@@ -198,12 +268,6 @@ def main():
             tags=[args.model_name, f"prune_layer_{args.prune_layer}",
                   f"keep_{int(args.keep_ratio * 100)}pct", "phase3", "distillation"],
         )
-
-    pre = _evaluate(student, teacher, val_loader, device,
-                     args.token_weight, args.cls_weight, args.mag_weight,
-                     desc="pre-train val")
-    print(f"\nPre-training val: loss={pre['loss']:.4f}  "
-          f"token_cos={pre['token_cosine_sim']:.4f}  cls_cos={pre['cls_cosine_sim']:.4f}")
 
     trainable_params = [p for p in student.backbone.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -248,7 +312,7 @@ def main():
         student.keep_ratio = args.keep_ratio
         val_m = _evaluate(student, teacher, val_loader, device,
                            args.token_weight, args.cls_weight, args.mag_weight,
-                           desc=f"val ep{epoch+1}")
+                           retrieval_k=args.retrieval_k, desc=f"val ep{epoch+1}")
 
         row = {
             "epoch": epoch + 1,
@@ -261,12 +325,11 @@ def main():
             "train_cls_mag_rel_error": total["cls_mag_rel_error"] / n_batches,
             "train_grad_norm": total_gnorm / n_batches,
             "val_loss": val_m["loss"],
-            "val_token_loss": val_m["token_loss"],
-            "val_cls_loss": val_m["cls_loss"],
-            "val_mag_loss": val_m["mag_loss"],
             "val_token_cosine_sim": val_m["token_cosine_sim"],
             "val_cls_cosine_sim": val_m["cls_cosine_sim"],
             "val_cls_mag_rel_error": val_m["cls_mag_rel_error"],
+            "val_cka_linear": val_m["cka_linear"],
+            "val_retrieval_recall_at_k": val_m["retrieval_recall_at_k"],
         }
         history.append(row)
         if use_wandb:
@@ -281,12 +344,11 @@ def main():
                 "train/cls_mag_rel_error": row["train_cls_mag_rel_error"],
                 "train/grad_norm": row["train_grad_norm"],
                 "val/loss": val_m["loss"],
-                "val/token_loss": val_m["token_loss"],
-                "val/cls_loss": val_m["cls_loss"],
-                "val/mag_loss": val_m["mag_loss"],
                 "val/token_cosine_sim": val_m["token_cosine_sim"],
                 "val/cls_cosine_sim": val_m["cls_cosine_sim"],
                 "val/cls_mag_rel_error": val_m["cls_mag_rel_error"],
+                "val/cka_linear": val_m["cka_linear"],
+                "val/retrieval_recall_at_k": val_m["retrieval_recall_at_k"],
             })
 
         if val_m["loss"] < best_val_loss:
@@ -306,12 +368,12 @@ def main():
     # --- Reload best checkpoint, merge LoRA into the base weights once, save ---
     student.load_state_dict(torch.load(lora_ckpt, map_location=device))
     student.eval()
-    final_val = _evaluate(student, teacher, val_loader, device,
-                           args.token_weight, args.cls_weight, args.mag_weight,
-                           desc="final val")
-    print(f"\n-- Best checkpoint -- val_loss={final_val['loss']:.4f}  "
-          f"token_cos={final_val['token_cosine_sim']:.4f}  "
-          f"cls_cos={final_val['cls_cosine_sim']:.4f}")
+    test_m = _evaluate(student, teacher, test_loader, device,
+                        args.token_weight, args.cls_weight, args.mag_weight,
+                        retrieval_k=args.retrieval_k, desc="final test")
+    print(f"\n-- Best checkpoint on test set -- loss={test_m['loss']:.4f}  "
+          f"token_cos={test_m['token_cosine_sim']:.4f}  cls_cos={test_m['cls_cosine_sim']:.4f}  "
+          f"cka={test_m['cka_linear']:.4f}  recall@{args.retrieval_k}={test_m['retrieval_recall_at_k']:.4f}")
 
     merged_backbone = student.backbone.merge_and_unload()
     backbone_ckpt = output_dir / f"distilled_{run_name}.pt"
@@ -324,19 +386,19 @@ def main():
         "prune_layer": args.prune_layer,
         "keep_ratio": args.keep_ratio,
         "forecaster_ckpt": forecaster_ckpt,
-        "pre_val_loss": round(pre["loss"], 6),
         "loss_weights": {
             "token": args.token_weight,
             "cls": args.cls_weight,
             "mag": args.mag_weight,
         },
-        "pre_val_token_cosine_sim": round(pre["token_cosine_sim"], 6),
-        "pre_val_cls_cosine_sim": round(pre["cls_cosine_sim"], 6),
-        "pre_val_cls_mag_rel_error": round(pre["cls_mag_rel_error"], 6),
+        "retrieval_k": args.retrieval_k,
         "best_val_loss": round(best_val_loss, 6),
-        "final_val_token_cosine_sim": round(final_val["token_cosine_sim"], 6),
-        "final_val_cls_cosine_sim": round(final_val["cls_cosine_sim"], 6),
-        "final_val_cls_mag_rel_error": round(final_val["cls_mag_rel_error"], 6),
+        "test_loss": round(test_m["loss"], 6),
+        "test_token_cosine_sim": round(test_m["token_cosine_sim"], 6),
+        "test_cls_cosine_sim": round(test_m["cls_cosine_sim"], 6),
+        "test_cls_mag_rel_error": round(test_m["cls_mag_rel_error"], 6),
+        "test_cka_linear": round(test_m["cka_linear"], 6),
+        "test_retrieval_recall_at_k": round(test_m["retrieval_recall_at_k"], 6),
         "backbone_ckpt": str(backbone_ckpt),
         "args": vars(args),
     }
@@ -345,10 +407,12 @@ def main():
 
     if use_wandb:
         wandb.log({
-            "final/val_loss": final_val["loss"],
-            "final/token_cosine_sim": final_val["token_cosine_sim"],
-            "final/cls_cosine_sim": final_val["cls_cosine_sim"],
-            "final/cls_mag_rel_error": final_val["cls_mag_rel_error"],
+            "test/loss": test_m["loss"],
+            "test/token_cosine_sim": test_m["token_cosine_sim"],
+            "test/cls_cosine_sim": test_m["cls_cosine_sim"],
+            "test/cls_mag_rel_error": test_m["cls_mag_rel_error"],
+            "test/cka_linear": test_m["cka_linear"],
+            "test/retrieval_recall_at_k": test_m["retrieval_recall_at_k"],
         })
         wandb.finish()
 

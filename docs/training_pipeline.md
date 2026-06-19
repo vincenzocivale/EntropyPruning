@@ -429,8 +429,23 @@ Argomenti principali:
 | `--forecaster-ckpt` | forecaster universale in `--cache-dir` | deve corrispondere a `--prune-layer` come source layer |
 | `--token-weight`, `--cls-weight`, `--mag-weight` | `1.0`, `0.5`, `0.1` | pesi di token cosine, CLS cosine e SmoothL1 sulle norme CLS |
 | `--keep-ratio-min` | unset | se impostato, campiona a ogni step un keep ratio uniforme in `[keep-ratio-min, keep-ratio]`; la validazione resta a `--keep-ratio` |
+| `--retrieval-k` | `5` | k per la metrica di retrieval consistency (deve essere < `--batch-size`) |
 | `--lora-r`, `--lora-alpha` | `8`, `32` | LoRA solo sui blocchi dopo `--prune-layer` |
 | `--epochs` | `10` | |
+
+**Eval e metriche loggate su W&B.** Train/val/test sono gli split standard THUNDER (nessuna eval
+"pre-training": si parte direttamente dalla prima epoca). Ogni epoca valuta sul **val set** (selezione
+checkpoint + early stopping su `val/loss`); a fine training il checkpoint migliore viene ri-valutato una
+sola volta sul **test set**. In entrambi i casi (`val/*` e, a fine corsa, `test/*`) vengono loggate:
+
+- **Cosine similarity CLS** student↔teacher (`cls_cosine_sim`)
+- **Cosine similarity token-level**, media sui token patch sopravvissuti al pruning (`token_cosine_sim`)
+- **Errore relativo di magnitudine CLS**, `|‖cls_student‖ − ‖cls_teacher‖| / ‖cls_teacher‖` (`cls_mag_rel_error`)
+- **CKA lineare** tra le feature CLS student e teacher, accumulata sull'intero split (non per-batch) (`cka_linear`)
+- **k-NN retrieval consistency**, recall@k in-batch: per ogni campione, frazione dei top-k vicini (cosine,
+  self escluso) calcolati nello spazio teacher che sono anche tra i top-k nello spazio student
+  (`retrieval_recall_at_k`). Il pool di retrieval è il batch stesso (serve `--batch-size` > `--retrieval-k`),
+  quindi è una proxy economica per-step, non una retrieval valutata sull'intero corpus.
 
 Poi, per il linear probe per-dataset sul backbone distillato (chiudendo il loop dell'Approccio 3):
 
