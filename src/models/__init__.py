@@ -28,3 +28,9 @@ from .evit import (
     evit_lora_targets,
     parse_evit_drop_locs,
 )
+from .papr import (
+    PaPrPrunedClassifier,
+    apply_papr_to_tokens,
+    build_papr_proposal,
+    papr_scores_from_features,
+)

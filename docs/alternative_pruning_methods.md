@@ -104,3 +104,73 @@ Useful EViT flags:
 --evit-shrink-start-epoch 10
 --evit-shrink-epochs 0
 ```
+
+## PaPr
+
+Source: https://github.com/tanvir-utexas/PaPr
+
+Reference inspected: public `main` branch, cloned on 2026-06-18.
+
+PaPr is integrated as an inference-only baseline in `src/models/papr.py` and
+`scripts/evaluate_papr.py`. It follows the authors' pipeline: a frozen
+pretrained ConvNet proposal model produces feature maps, channels are averaged
+to a patch significance map, the map is bicubic-upsampled to the ViT patch
+grid, and the highest-scoring patches are kept before the Transformer blocks.
+No EAF forecaster, PaPr training, or pruned fine-tuning is used.
+
+EAF preserves all Thunder prefix tokens (CLS plus any register tokens) and
+applies `--keep-ratios` to spatial patch tokens only. This is the practical
+adaptation needed for histopathology foundation models that expose more than
+one prefix token.
+
+Evaluate a Phase 1 classifier checkpoint with PaPr:
+
+```bash
+python scripts/evaluate_papr.py \
+    --model-name uni \
+    --dataset-name crc \
+    --base-data-folder /path/to/thunder/data \
+    --adaptation lora \
+    --proposal-model mobileone_s0 \
+    --keep-ratios 0.7 0.5 0.3 \
+    --include-baseline \
+    --benchmark
+```
+
+By default, `mobileone_s0` is built through timm with pretrained weights, which
+matches the lightweight ConvNet proposal used in the PaPr ViT scripts. ResNet
+proposal models (`resnet18`, `resnet50`, `resnet101`, `resnet152`) are also
+available through torchvision. You can pass
+`--proposal-weights /path/to/checkpoint.pt` for a local proposal checkpoint,
+but local MobileOne weights must match timm's key layout; the original Apple
+MobileOne checkpoints used by PaPr have a different module naming scheme.
+
+Results are written to `results/papr/{dataset}_{model}_{adaptation}_{split}.csv`
+unless `--output-csv` is provided.
+
+For quick smoke checks, cap the split size:
+
+```bash
+python scripts/evaluate_papr.py \
+    --model-name uni \
+    --dataset-name crc \
+    --base-data-folder /path/to/thunder/data \
+    --ckpt-root /path/to/checkpoints \
+    --adaptation linear_probing \
+    --max-samples 64 \
+    --keep-ratios 0.7 0.5
+```
+
+To sweep several repository datasets or FMs and aggregate one CSV:
+
+```bash
+python scripts/evaluate_papr_grid.py \
+    --model-names uni \
+    --dataset-names crc break_his \
+    --base-data-folder /path/to/thunder/data \
+    --ckpt-root /path/to/checkpoints \
+    --adaptation linear_probing \
+    --keep-ratios 0.7 0.5 0.3 \
+    --include-baseline \
+    --output-csv results/papr/grid.csv
+```

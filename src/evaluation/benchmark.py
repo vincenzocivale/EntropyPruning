@@ -18,7 +18,9 @@ def benchmark_model(model, loader, device, n_warmup=10, label="model"):
         print(f"FLOPs not computable: {e}")
         total_flops = None
 
-    # GPU warmup
+    use_cuda = device.type == "cuda" if isinstance(device, torch.device) else str(device).startswith("cuda")
+
+    # Warmup
     with torch.no_grad():
         for i, (imgs, _) in enumerate(loader):
             model(imgs.to(device))
@@ -26,13 +28,15 @@ def benchmark_model(model, loader, device, n_warmup=10, label="model"):
                 break
 
     # Timing
-    torch.cuda.synchronize()
+    if use_cuda:
+        torch.cuda.synchronize()
     t0 = time.perf_counter()
     n_imgs = 0
     with torch.no_grad():
         for imgs, _ in loader:
             model(imgs.to(device))
-            torch.cuda.synchronize()
+            if use_cuda:
+                torch.cuda.synchronize()
             n_imgs += len(imgs)
     t1 = time.perf_counter()
 
