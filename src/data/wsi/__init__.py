@@ -9,9 +9,11 @@ from src.data.wsi.dataset import (
     WSIBagDataset,
 )
 from src.data.wsi.feature_store import InMemoryWSIFeatureStore, WSIFeatureStore
+from src.data.wsi.h5_feature_store import H5WSIFeatureStore
 
 __all__ = [
     "FeatureStoreWSIBagDataset",
+    "H5WSIFeatureStore",
     "InMemoryWSIBagDataset",
     "InMemoryWSIFeatureStore",
     "PaddedWSIBatch",
