@@ -2,7 +2,7 @@
 
 from src.data.wsi.bag import WSIBag
 from src.data.wsi.batch import PaddedWSIBatch, pad_wsi_bags
-from src.data.wsi.collate import collate_wsi_bags
+from src.data.wsi.collate import collate_padded_wsi_bags, collate_wsi_bags
 from src.data.wsi.dataset import (
     FeatureStoreWSIBagDataset,
     InMemoryWSIBagDataset,
@@ -18,6 +18,7 @@ __all__ = [
     "WSIBag",
     "WSIBagDataset",
     "WSIFeatureStore",
+    "collate_padded_wsi_bags",
     "collate_wsi_bags",
     "pad_wsi_bags",
 ]

@@ -63,3 +63,48 @@ def test_dataloader_with_collate_wsi_bags_supports_batch_size_greater_than_one()
     assert [bag.slide_id for bag in first_batch] == ["slide_001", "slide_002"]
     assert first_batch[0].n_tiles == 4
     assert first_batch[1].n_tiles == 7
+
+
+from src.data.wsi import PaddedWSIBatch, collate_padded_wsi_bags
+
+
+def test_collate_padded_wsi_bags_returns_padded_batch() -> None:
+    bags = [
+        _make_bag("slide_001", n_tiles=4),
+        _make_bag("slide_002", n_tiles=7),
+    ]
+
+    batch = collate_padded_wsi_bags(bags)
+
+    assert isinstance(batch, PaddedWSIBatch)
+    assert batch.slide_ids == ("slide_001", "slide_002")
+    assert batch.tile_features.shape == (2, 7, 8)
+    assert batch.mask.tolist() == [
+        [True, True, True, True, False, False, False],
+        [True, True, True, True, True, True, True],
+    ]
+
+
+def test_dataloader_with_collate_padded_wsi_bags_returns_padded_batch() -> None:
+    dataset = InMemoryWSIBagDataset(
+        [
+            _make_bag("slide_001", n_tiles=4),
+            _make_bag("slide_002", n_tiles=7),
+            _make_bag("slide_003", n_tiles=5),
+        ]
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        collate_fn=collate_padded_wsi_bags,
+    )
+
+    batch = next(iter(loader))
+
+    assert isinstance(batch, PaddedWSIBatch)
+    assert batch.slide_ids == ("slide_001", "slide_002")
+    assert batch.tile_features.shape == (2, 7, 8)
+    assert batch.mask.shape == (2, 7)
+    assert batch.attention is not None
+    assert batch.attention.shape == (2, 7)
