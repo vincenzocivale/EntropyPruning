@@ -1,6 +1,7 @@
 """WSI-level data contracts and loaders."""
 
 from src.data.wsi.bag import WSIBag
+from src.data.wsi.batch import PaddedWSIBatch, pad_wsi_bags
 from src.data.wsi.collate import collate_wsi_bags
 from src.data.wsi.dataset import (
     FeatureStoreWSIBagDataset,
@@ -13,8 +14,10 @@ __all__ = [
     "FeatureStoreWSIBagDataset",
     "InMemoryWSIBagDataset",
     "InMemoryWSIFeatureStore",
+    "PaddedWSIBatch",
     "WSIBag",
     "WSIBagDataset",
     "WSIFeatureStore",
     "collate_wsi_bags",
+    "pad_wsi_bags",
 ]
