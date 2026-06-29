@@ -37,6 +37,7 @@ def test_run_trident_import_smoke_script(tmp_path) -> None:
         workdir / "labels.csv",
         workdir / "manifest_trident.csv",
         workdir / "features_trident_eaf.h5",
+        workdir / "feature_store_inspection.json",
         workdir / "trident_processed/20x_256px_0px_overlap/features_uni_v1/slide_000.h5",
         workdir / "trident_processed/20x_256px_0px_overlap/patches/slide_000.h5",
     ]

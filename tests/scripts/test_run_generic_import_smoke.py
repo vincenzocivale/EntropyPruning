@@ -37,6 +37,7 @@ def test_run_generic_import_smoke_script(tmp_path) -> None:
         workdir / "labels.csv",
         workdir / "manifest_generic.csv",
         workdir / "features_generic_eaf.h5",
+        workdir / "feature_store_inspection.json",
         workdir / "features/slide_000.pt",
         workdir / "features/slide_001.npy",
         workdir / "features/slide_002.npz",

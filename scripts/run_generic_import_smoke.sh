@@ -17,6 +17,7 @@ COORDS_DIR="${WORKDIR}/coords"
 LABELS_CSV="${WORKDIR}/labels.csv"
 MANIFEST_CSV="${WORKDIR}/manifest_generic.csv"
 OUTPUT_STORE="${WORKDIR}/features_generic_eaf.h5"
+INSPECTION_JSON="${WORKDIR}/feature_store_inspection.json"
 
 rm -rf "${WORKDIR}"
 mkdir -p "${FEATURES_DIR}" "${COORDS_DIR}"
@@ -100,6 +101,11 @@ echo "[generic-smoke] validating imported EAF feature store"
   --feature-dim "${FEATURE_DIM}" \
   --require-coords
 
+echo "[generic-smoke] inspecting imported EAF feature store"
+"${PYTHON_BIN}" scripts/inspect_wsi_feature_store.py \
+  --feature-store "${OUTPUT_STORE}" \
+  --output-json "${INSPECTION_JSON}"
+
 cat <<EOF
 [generic-smoke] done
 workdir: ${WORKDIR}
@@ -108,4 +114,5 @@ coords_dir: ${COORDS_DIR}
 labels_csv: ${LABELS_CSV}
 manifest_csv: ${MANIFEST_CSV}
 output_store: ${OUTPUT_STORE}
+inspection_json: ${INSPECTION_JSON}
 EOF
