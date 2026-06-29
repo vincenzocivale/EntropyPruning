@@ -72,6 +72,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional newline-delimited validation slide ids.",
     )
+    parser.add_argument(
+        "--split-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional directory containing train.txt and val.txt. "
+            "Mutually exclusive with --train-slide-ids-file/--val-slide-ids-file."
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=0)
 
     args = parser.parse_args()
@@ -104,12 +113,26 @@ def _validate_args(args: argparse.Namespace) -> None:
 
     has_train_file = args.train_slide_ids_file is not None
     has_val_file = args.val_slide_ids_file is not None
+    has_split_dir = args.split_dir is not None
+
+    if has_split_dir and (has_train_file or has_val_file):
+        raise ValueError(
+            "--split-dir is mutually exclusive with "
+            "--train-slide-ids-file/--val-slide-ids-file."
+        )
+
+    if has_split_dir:
+        if not args.split_dir.exists():
+            raise FileNotFoundError(f"split directory not found: {args.split_dir}")
+        if not args.split_dir.is_dir():
+            raise NotADirectoryError(f"split path is not a directory: {args.split_dir}")
+
     if has_train_file != has_val_file:
         raise ValueError(
             "--train-slide-ids-file and --val-slide-ids-file must be provided together."
         )
 
-    if not has_train_file and not 0.0 < args.val_ratio < 1.0:
+    if not has_split_dir and not has_train_file and not 0.0 < args.val_ratio < 1.0:
         raise ValueError("--val-ratio must be in (0, 1) when split files are not used.")
 
 
@@ -165,8 +188,12 @@ def _resolve_splits(
     seed: int,
     train_slide_ids_file: Path | None,
     val_slide_ids_file: Path | None,
+    split_dir: Path | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    if train_slide_ids_file is not None and val_slide_ids_file is not None:
+    if split_dir is not None:
+        train_ids = _read_slide_ids(split_dir / "train.txt")
+        val_ids = _read_slide_ids(split_dir / "val.txt")
+    elif train_slide_ids_file is not None and val_slide_ids_file is not None:
         train_ids = _read_slide_ids(train_slide_ids_file)
         val_ids = _read_slide_ids(val_slide_ids_file)
     else:
@@ -219,6 +246,7 @@ def main() -> None:
         seed=args.seed,
         train_slide_ids_file=args.train_slide_ids_file,
         val_slide_ids_file=args.val_slide_ids_file,
+        split_dir=args.split_dir,
     )
 
     train_dataset = FeatureStoreWSIBagDataset(store, slide_ids=train_ids)
