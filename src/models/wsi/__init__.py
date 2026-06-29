@@ -1,5 +1,6 @@
 """WSI-level models."""
 
+from src.models.wsi.abmil import ABMILClassifier, ABMILOutput
 from src.models.wsi.checkpoint import (
     WSITileAttentionForecasterCheckpoint,
     WSITileAttentionForecasterConfig,
@@ -12,6 +13,8 @@ from src.models.wsi.tile_attention_forecaster import (
 )
 
 __all__ = [
+    "ABMILClassifier",
+    "ABMILOutput",
     "WSITileAttentionForecaster",
     "WSITileAttentionForecasterCheckpoint",
     "WSITileAttentionForecasterConfig",
