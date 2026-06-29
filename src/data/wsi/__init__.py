@@ -10,8 +10,18 @@ from src.data.wsi.dataset import (
 )
 from src.data.wsi.feature_store import InMemoryWSIFeatureStore, WSIFeatureStore
 from src.data.wsi.h5_feature_store import H5WSIFeatureStore
+from src.data.wsi.trident import (
+    TridentSlideRecord,
+    load_trident_slide_record,
+    read_trident_coords,
+    read_trident_features,
+)
 
 __all__ = [
+    "read_trident_features",
+    "read_trident_coords",
+    "load_trident_slide_record",
+    "TridentSlideRecord",
     "FeatureStoreWSIBagDataset",
     "H5WSIFeatureStore",
     "InMemoryWSIBagDataset",
