@@ -378,6 +378,74 @@ checkpoints/exp001_forecaster/training_summary.json
 
 The training objective is KL divergence between teacher attention and predicted attention. Attention targets are normalized over valid tiles.
 
+### 9.1 Generalized tile importance forecaster (paired stores, multiple losses)
+
+`scripts/train_wsi_importance_forecaster.py` generalizes the forecaster
+above: `WSITileImportanceForecaster` predicts a scalar tile-importance
+score (`WSITileAttentionForecaster` remains as a backward-compatible alias),
+supervised by whatever target you supply — ABMIL attention, or a
+precomputed WSI foundation model tile score imported via
+`scripts/import_wsi_importance_targets.py`. Input tile features and the
+importance target can live in two separately produced feature stores
+(`--input-feature-store`/`--target-feature-store`), joined by slide id and
+optionally aligned by exact tile coordinates (`--alignment-mode coords`)
+instead of assuming identical tile order (`--alignment-mode index`, the
+default). `--loss` selects between `kl` (default, matches the legacy
+script), `mse`, `topk_bce`, and `kl+rank`.
+
+```bash
+python scripts/train_wsi_importance_forecaster.py \
+  --input-feature-store data/features_layer2.h5 \
+  --target-feature-store data/features_wsi_importance.h5 \
+  --output-dir checkpoints/exp001_importance_forecaster \
+  --input-feature-dim 384 \
+  --loss kl \
+  --top-k 10 \
+  --epochs 20 \
+  --batch-size 4 \
+  --split-dir splits/exp001 \
+  --alignment-mode coords \
+  --device cuda
+```
+
+`train_wsi_attention_forecaster.py` is unchanged and keeps working exactly
+as documented above; use the generalized script when you need paired
+stores, a non-KL loss, or richer checkpoint/summary metadata for evaluation
+and pruning. See `docs/wsi_cli_reference.md` for the full flag list and
+`docs/wsi_paired_feature_store_audit.md` for the paired-store data-layer
+design (`PairedWSIBag`, `load_paired_wsi_bag`, `PairedFeatureStoreWSIBagDataset`).
+
+To use a precomputed, non-ABMIL importance target (e.g. from a WSI
+foundation model), build and import it first:
+
+```bash
+python scripts/build_wsi_importance_manifest.py \
+  --targets-dir trident_processed/.../tile_importance_gigapath \
+  --coords-dir trident_processed/.../patches \
+  --output-manifest manifests/gigapath_importance.csv \
+  --target-source gigapath_wsi_fm \
+  --require-coords
+
+python scripts/import_wsi_importance_targets.py \
+  --manifest manifests/gigapath_importance.csv \
+  --output-feature-store data/features_wsi_importance.h5 \
+  --require-coords
+```
+
+TRIDENT is never a hard dependency here: both scripts only expect
+TRIDENT-*style* per-slide artifacts (one HDF5/`.pt`/`.npy`/`.npz` file per
+slide), not a live TRIDENT installation. See
+`src/models/wsi/importance_providers.py` for the `WSIImportanceProvider`
+interface (`PrecomputedImportanceProvider`, `ABMILImportanceProvider`, and a
+documented `TridentSlideEncoderImportanceProvider` stub) if you are writing
+new target-generation code rather than importing an already-computed target.
+
+See `docs/wsi_tile_importance_forecasting.md` for a dedicated walkthrough of
+this generalized pipeline: the attention-matrix-vs-scalar-importance
+distinction, why the on-disk field is still called `attention`, single-store
+vs. paired-store mode, and a full synthetic CLI example
+(`scripts/run_wsi_tile_importance_synthetic_smoke.sh`).
+
 ---
 
 ## 10. Evaluating pruning quality
@@ -406,6 +474,33 @@ attention mass retained
 oracle attention mass
 relative attention mass retained
 ```
+
+### 10.1b Tile-importance pruning evaluation (paired stores)
+
+Generalized replacement for `evaluate_wsi_forecaster_pruning.py`: accepts an
+input/selection feature store and a target feature store separately, so the
+importance target does not need to live in the same store as the
+forecaster's input features. `evaluate_wsi_forecaster_pruning.py` is
+unaffected and keeps working exactly as before.
+
+```bash
+python scripts/evaluate_wsi_importance_pruning.py \
+  --input-feature-store data/features_layer2.h5 \
+  --target-feature-store data/features_wsi_importance.h5 \
+  --forecaster-checkpoint checkpoints/exp001_importance_forecaster/best_wsi_tile_importance_forecaster.pt \
+  --slide-ids-file splits/exp001/test.txt \
+  --keep-ratios 0.05 0.10 0.25 0.50 1.0 \
+  --alignment-mode coords \
+  --output-csv results/exp001_importance_pruning.csv \
+  --device cuda
+```
+
+Metrics include the same target-importance recovery metrics as
+`evaluate_wsi_forecaster_pruning.py` (Spearman, top-k overlap, NDCG@k,
+target/oracle importance mass retained, relative retained mass, selected
+tile count, effective keep ratio). Passing `--abmil-checkpoint` additionally
+evaluates full-vs-pruned ABMIL prediction agreement using the selection-store
+features; it is optional and not required for the new pipeline.
 
 ### 10.2 ABMIL full-vs-pruned agreement
 
@@ -469,6 +564,26 @@ python scripts/create_pruned_wsi_feature_store.py \
 
 Selected tile indices are sorted back into original slide order before writing. The output metadata records pruning details.
 
+Tiles can also be *selected* from one store (e.g. early-layer features) and
+*materialized* from a different store (e.g. late-layer features for a
+downstream WSI model), aligned by array index or by exact tile coordinates:
+
+```bash
+python scripts/create_pruned_wsi_feature_store.py \
+  --selection-feature-store data/features_layer2.h5 \
+  --materialize-feature-store data/features_late.h5 \
+  --output-feature-store data/features_late_pruned_keep_0.10.h5 \
+  --forecaster-checkpoint checkpoints/exp001_importance_forecaster/best_wsi_tile_importance_forecaster.pt \
+  --keep-ratio 0.10 \
+  --alignment-mode coords \
+  --device cuda
+```
+
+`--input-feature-store` (legacy single-store mode) is mutually exclusive with
+`--selection-feature-store`/`--materialize-feature-store`; `--materialize-feature-store`
+defaults to `--selection-feature-store` when omitted. See
+`docs/wsi_cli_reference.md` for the full flag and metadata list.
+
 The pruned store can be used as input to downstream WSI training:
 
 ```bash
@@ -521,6 +636,16 @@ DEVICE=cpu \
 bash scripts/run_wsi_synthetic_e2e_smoke.sh
 ```
 
+For the paired-store tile-importance pipeline (§9.1, §10.1b, §12) there is a
+separate synthetic smoke script covering the early/late/importance-target
+early-selection-plus-late-materialization flow:
+
+```bash
+bash scripts/run_wsi_tile_importance_synthetic_smoke.sh
+```
+
+See `docs/wsi_tile_importance_forecasting.md` §6 for what it exercises.
+
 ---
 
 ## 14. Recommended first real experiment: `exp001`
@@ -566,10 +691,17 @@ raw WSI tiling
 raw image encoder inference
 multi-resolution feature extraction
 CLAM / DSMIL / TransMIL teacher wrappers
-formal early-feature vs late-feature dual-store contract
 full experiment runner
 full report generator
 ```
+
+The early-feature vs late-feature dual-store contract is now supported:
+`scripts/train_wsi_importance_forecaster.py` accepts separate
+`--input-feature-store`/`--target-feature-store` (see 9.1). TRIDENT slide
+encoders that pool tiles without exposing tile-level attention are still not
+supported as a live importance source — `TridentSlideEncoderImportanceProvider`
+is a documented stub, not a working adapter; use a precomputed target import
+or an ABMIL teacher instead.
 
 The current teacher is ABMIL. Results should be interpreted as ABMIL-teacher-specific.
 

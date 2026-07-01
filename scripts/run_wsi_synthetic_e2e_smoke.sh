@@ -4,7 +4,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PARENT_EXE="$(readlink -f "/proc/${PPID}/exe" 2>/dev/null || true)"
+  if [[ -n "${PARENT_EXE}" && -x "${PARENT_EXE}" && "${PARENT_EXE}" == *python* ]]; then
+    PYTHON_BIN="${PARENT_EXE}"
+  else
+    PYTHON_BIN="python"
+  fi
+fi
 
 WORKDIR="${WORKDIR:-/tmp/eaf_wsi_synthetic_e2e}"
 FEATURE_DIM="${FEATURE_DIM:-8}"

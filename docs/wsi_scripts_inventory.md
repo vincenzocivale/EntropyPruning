@@ -11,7 +11,10 @@ build_trident_manifest.py
 import_trident_feature_store.py
 build_generic_feature_manifest.py
 import_generic_feature_store.py
+build_wsi_importance_manifest.py
+import_wsi_importance_targets.py
 create_synthetic_wsi_feature_store.py
+create_synthetic_wsi_importance_stores.py
 ```
 
 Purpose:
@@ -68,7 +71,9 @@ These are required for the WSI attention forecasting workflow.
 
 ```text
 train_wsi_attention_forecaster.py
+train_wsi_importance_forecaster.py
 evaluate_wsi_forecaster_pruning.py
+evaluate_wsi_importance_pruning.py
 evaluate_wsi_abmil_pruning_agreement.py
 plot_wsi_pruning_curves.py
 create_pruned_wsi_feature_store.py
@@ -77,12 +82,20 @@ create_pruned_wsi_feature_store.py
 Purpose:
 
 ```text
-train tile attention forecaster
-evaluate attention-level pruning quality
+train tile attention forecaster (legacy, single fused store, KL loss only)
+train tile importance forecaster (paired stores, configurable loss)
+evaluate attention-level pruning quality (legacy, single fused store)
+evaluate tile-importance pruning quality (paired stores, optional ABMIL agreement)
 evaluate prediction preservation after pruning
 plot pruning curves
-materialize pruned feature stores
+materialize pruned feature stores (legacy single-store, or selection/materialize stores)
 ```
+
+`train_wsi_importance_forecaster.py` generalizes
+`train_wsi_attention_forecaster.py`; `evaluate_wsi_importance_pruning.py`
+generalizes `evaluate_wsi_forecaster_pruning.py`; `create_pruned_wsi_feature_store.py`
+gained `--selection-feature-store`/`--materialize-feature-store` support.
+The legacy scripts and legacy CLI flags are kept and unmodified.
 
 These are the core EAF-style WSI pruning tools.
 
@@ -94,12 +107,15 @@ These are the core EAF-style WSI pruning tools.
 run_trident_import_smoke.sh
 run_generic_import_smoke.sh
 run_wsi_synthetic_e2e_smoke.sh
+run_wsi_tile_importance_synthetic_smoke.sh
 ```
 
 Purpose:
 
 ```text
 fast sanity checks for import paths and end-to-end WSI pipeline
+run_wsi_tile_importance_synthetic_smoke.sh additionally covers the
+paired-store tile-importance pipeline (see docs/wsi_tile_importance_forecasting.md)
 ```
 
 These scripts are intentionally committed because tests call them and because they document executable workflows.
