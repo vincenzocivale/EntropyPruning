@@ -14,16 +14,28 @@ from src.training.wsi.attention_forecasting import (
     run_wsi_attention_forecasting_batch,
     train_wsi_attention_forecasting_epoch,
 )
+from src.training.wsi.importance_forecasting import (
+    WSIImportanceForecastingBatchOutput,
+    WSIImportanceForecastingEpochOutput,
+    evaluate_wsi_tile_importance_forecasting_epoch,
+    run_wsi_tile_importance_forecasting_batch,
+    train_wsi_tile_importance_forecasting_epoch,
+)
 
 __all__ = [
     "ABMILClassificationBatchOutput",
     "ABMILClassificationEpochOutput",
     "WSIAttentionForecastingBatchOutput",
     "WSIAttentionForecastingEpochOutput",
+    "WSIImportanceForecastingBatchOutput",
+    "WSIImportanceForecastingEpochOutput",
     "evaluate_abmil_classification_epoch",
     "evaluate_wsi_attention_forecasting_epoch",
+    "evaluate_wsi_tile_importance_forecasting_epoch",
     "run_abmil_classification_batch",
     "run_wsi_attention_forecasting_batch",
+    "run_wsi_tile_importance_forecasting_batch",
     "train_abmil_classification_epoch",
     "train_wsi_attention_forecasting_epoch",
+    "train_wsi_tile_importance_forecasting_epoch",
 ]

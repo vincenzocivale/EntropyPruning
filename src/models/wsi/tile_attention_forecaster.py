@@ -1,11 +1,20 @@
-"""WSI-level tile attention forecaster.
+"""WSI-level tile importance forecaster.
 
-This module predicts the MIL/WSI-level attention assigned to each tile from
-tile-level features, typically extracted from an early layer of a tile encoder.
+This module predicts a scalar importance score for each tile in a WSI bag
+from tile-level features, typically extracted from an early layer of a tile
+encoder. The supervision target (``target_importance``) is tile-level
+attention/importance extracted from an MIL teacher (e.g. ABMIL), a WSI
+foundation model, or any other precomputed tile-importance source — this
+module does not care where the target came from.
 
 It is intentionally separate from ``src.models.forecaster.AttentionForecaster``:
 that module predicts patch-token attention inside one tile, while this module
-predicts tile attention inside one WSI bag.
+predicts tile importance inside one WSI bag.
+
+``WSITileAttentionForecaster`` is kept as a backward-compatible alias of
+``WSITileImportanceForecaster``: the model predicts an importance score, and
+"attention" was the name used before this module supported non-attention
+importance targets (e.g. WSI-FM tile scores).
 """
 
 from __future__ import annotations
@@ -78,8 +87,8 @@ def _validate_mask(mask: torch.Tensor | None, batch_size: int, n_tiles: int) -> 
     return mask
 
 
-class WSITileAttentionForecaster(nn.Module):
-    """Predict MIL attention scores for tiles in a WSI bag.
+class WSITileImportanceForecaster(nn.Module):
+    """Predict tile-importance scores for tiles in a WSI bag.
 
     Args:
         feature_dim: Dimensionality of each tile feature vector.
@@ -187,6 +196,12 @@ class WSITileAttentionForecaster(nn.Module):
         return scores
 
 
+# Backward-compatible alias: this class used to be the only importance
+# source (ABMIL attention), hence the "Attention" name. It now predicts a
+# generic tile-importance score regardless of target source.
+WSITileAttentionForecaster = WSITileImportanceForecaster
+
+
 def wsi_attention_kl_loss(
     scores: torch.Tensor,
     target_attention: torch.Tensor,
@@ -273,3 +288,236 @@ def wsi_attention_kl_loss(
     log_probs = F.log_softmax(masked_scores, dim=1)
 
     return F.kl_div(log_probs, target_probs, reduction="batchmean")
+
+
+WSI_TILE_IMPORTANCE_LOSS_TYPES = ("kl", "mse", "topk_bce", "kl+rank")
+
+
+def _validate_scores_and_target(
+    scores: torch.Tensor,
+    target_importance: torch.Tensor,
+    mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shared validation for the non-KL importance losses below.
+
+    Returns ``(scores_batched, target_batched, valid_mask)`` with ``mask``
+    resolved to an all-True tensor when not provided. ``wsi_attention_kl_loss``
+    keeps its own inlined validation so its error messages/behaviour stay
+    stable for existing callers; this helper only backs the newer losses.
+    """
+
+    scores_batched, _ = _as_batched_scores(scores)
+
+    if not isinstance(target_importance, torch.Tensor):
+        raise TypeError("target_importance must be a torch.Tensor.")
+
+    if target_importance.ndim == 1:
+        target_batched = target_importance.unsqueeze(0)
+    elif target_importance.ndim == 2:
+        target_batched = target_importance
+    else:
+        raise ValueError(
+            "target_importance must have shape [n_tiles] or [batch, n_tiles]; "
+            f"got {tuple(target_importance.shape)}."
+        )
+
+    if target_batched.shape != scores_batched.shape:
+        raise ValueError(
+            "target_importance shape must match scores shape; "
+            f"got {tuple(target_batched.shape)} and {tuple(scores_batched.shape)}."
+        )
+
+    batch_size, n_tiles = scores_batched.shape
+    valid_mask = _validate_mask(mask, batch_size, n_tiles)
+
+    if not torch.is_floating_point(scores_batched):
+        raise TypeError("scores must be a floating-point tensor.")
+    if not torch.is_floating_point(target_batched):
+        raise TypeError("target_importance must be a floating-point tensor.")
+    if not torch.isfinite(scores_batched).all():
+        raise ValueError("scores must contain only finite values.")
+    if not torch.isfinite(target_batched).all():
+        raise ValueError("target_importance must contain only finite values.")
+    if (target_batched < 0).any():
+        raise ValueError("target_importance must be non-negative.")
+
+    if valid_mask is None:
+        valid_mask = torch.ones(
+            (batch_size, n_tiles),
+            dtype=torch.bool,
+            device=scores_batched.device,
+        )
+
+    target_batched = target_batched.to(device=scores_batched.device)
+    valid_mask = valid_mask.to(device=scores_batched.device)
+
+    return scores_batched, target_batched, valid_mask
+
+
+def wsi_tile_importance_mse_loss(
+    scores: torch.Tensor,
+    target_importance: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """MSE loss between predicted and target tile-importance distributions.
+
+    Both ``scores`` and ``target_importance`` are normalized into probability
+    distributions over valid tiles per bag (scores via softmax, target via
+    sum-normalization), so this loss lives in the same probability space as
+    ``wsi_attention_kl_loss`` and is a drop-in alternative divergence.
+    """
+
+    scores_batched, target_batched, valid_mask = _validate_scores_and_target(
+        scores, target_importance, mask
+    )
+    valid_mask_float = valid_mask.to(dtype=target_batched.dtype)
+
+    masked_target = target_batched * valid_mask_float
+    target_mass = masked_target.sum(dim=1, keepdim=True)
+    if (target_mass <= 0).any():
+        raise ValueError("target_importance must have positive mass on valid tiles.")
+    target_probs = masked_target / target_mass
+
+    masked_scores = scores_batched.masked_fill(
+        ~valid_mask,
+        torch.finfo(scores_batched.dtype).min,
+    )
+    pred_probs = F.softmax(masked_scores, dim=1) * valid_mask_float
+
+    n_valid = valid_mask_float.sum(dim=1)
+    per_sample = ((pred_probs - target_probs) ** 2 * valid_mask_float).sum(dim=1) / n_valid
+
+    return per_sample.mean()
+
+
+def wsi_tile_importance_topk_bce_loss(
+    scores: torch.Tensor,
+    target_importance: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    top_k: int = 10,
+) -> torch.Tensor:
+    """Binary cross-entropy loss treating the target top-k tiles as positives.
+
+    For each bag, the ``top_k`` valid tiles by target importance are labelled
+    ``1`` and the rest ``0``; ``scores`` are treated as per-tile logits for
+    "this tile belongs to the retained top-k set".
+    """
+
+    if top_k <= 0:
+        raise ValueError("top_k must be positive.")
+
+    scores_batched, target_batched, valid_mask = _validate_scores_and_target(
+        scores, target_importance, mask
+    )
+
+    losses = []
+    for sample_scores, sample_target, sample_mask in zip(
+        scores_batched, target_batched, valid_mask, strict=True
+    ):
+        valid_scores = sample_scores[sample_mask]
+        valid_target = sample_target[sample_mask]
+        n_valid = int(valid_scores.numel())
+
+        if n_valid < 2:
+            raise ValueError("topk_bce loss requires at least two valid tiles per sample.")
+
+        k = min(top_k, n_valid)
+        pos_idx = torch.topk(valid_target, k=k).indices
+
+        binary_target = torch.zeros_like(valid_scores)
+        binary_target[pos_idx] = 1.0
+
+        losses.append(F.binary_cross_entropy_with_logits(valid_scores, binary_target))
+
+    return torch.stack(losses).mean()
+
+
+def wsi_tile_importance_rank_loss(
+    scores: torch.Tensor,
+    target_importance: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    top_k: int = 10,
+    margin: float = 1.0,
+) -> torch.Tensor:
+    """Pairwise margin ranking loss between top-k and bottom-k target tiles.
+
+    For each bag, the ``top_k`` valid tiles by target importance should be
+    scored higher than the bottom-``k`` valid tiles by at least ``margin``.
+    This is a bounded-cost (``O(k^2)`` per bag) ranking surrogate, used as the
+    "rank" component of the ``kl+rank`` combined loss.
+    """
+
+    if top_k <= 0:
+        raise ValueError("top_k must be positive.")
+    if margin <= 0:
+        raise ValueError("margin must be positive.")
+
+    scores_batched, target_batched, valid_mask = _validate_scores_and_target(
+        scores, target_importance, mask
+    )
+
+    losses = []
+    for sample_scores, sample_target, sample_mask in zip(
+        scores_batched, target_batched, valid_mask, strict=True
+    ):
+        valid_scores = sample_scores[sample_mask]
+        valid_target = sample_target[sample_mask]
+        n_valid = int(valid_scores.numel())
+
+        if n_valid < 2:
+            raise ValueError("rank loss requires at least two valid tiles per sample.")
+
+        k = max(1, min(top_k, n_valid // 2))
+        pos_idx = torch.topk(valid_target, k=k, largest=True).indices
+        neg_idx = torch.topk(valid_target, k=k, largest=False).indices
+
+        pos_scores = valid_scores[pos_idx]
+        neg_scores = valid_scores[neg_idx]
+
+        diff = pos_scores.unsqueeze(1) - neg_scores.unsqueeze(0)
+        losses.append(F.relu(margin - diff).mean())
+
+    return torch.stack(losses).mean()
+
+
+def wsi_tile_importance_loss(
+    scores: torch.Tensor,
+    target_importance: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    loss: str = "kl",
+    top_k: int = 10,
+    rank_weight: float = 0.1,
+    rank_margin: float = 1.0,
+) -> torch.Tensor:
+    """Dispatch to one of the supported tile-importance loss functions.
+
+    Args:
+        loss: One of ``"kl"``, ``"mse"``, ``"topk_bce"``, or ``"kl+rank"``.
+            ``"kl+rank"`` adds ``rank_weight * wsi_tile_importance_rank_loss``
+            to the KL loss.
+    """
+
+    if loss not in WSI_TILE_IMPORTANCE_LOSS_TYPES:
+        raise ValueError(
+            f"loss must be one of {WSI_TILE_IMPORTANCE_LOSS_TYPES}; got {loss!r}."
+        )
+
+    if loss == "kl":
+        return wsi_attention_kl_loss(scores, target_importance, mask=mask)
+
+    if loss == "mse":
+        return wsi_tile_importance_mse_loss(scores, target_importance, mask=mask)
+
+    if loss == "topk_bce":
+        return wsi_tile_importance_topk_bce_loss(
+            scores, target_importance, mask=mask, top_k=top_k
+        )
+
+    kl = wsi_attention_kl_loss(scores, target_importance, mask=mask)
+    rank = wsi_tile_importance_rank_loss(
+        scores, target_importance, mask=mask, top_k=top_k, margin=rank_margin
+    )
+    return kl + rank_weight * rank
