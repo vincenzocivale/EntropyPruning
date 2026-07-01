@@ -38,7 +38,11 @@ def test_run_wsi_synthetic_e2e_smoke_script(tmp_path) -> None:
         env=env,
         capture_output=True,
         text=True,
-        check=True,
+    )
+    assert result.returncode == 0, (
+        "synthetic E2E smoke failed\n"
+        f"STDOUT:\n{result.stdout}\n"
+        f"STDERR:\n{result.stderr}\n"
     )
 
     assert "[wsi-e2e] done" in result.stdout
@@ -47,6 +51,10 @@ def test_run_wsi_synthetic_e2e_smoke_script(tmp_path) -> None:
         workdir / "features_raw.h5",
         workdir / "features_abmil_attention.h5",
         workdir / "features_pruned_keep_0.5.h5",
+        workdir / "splits/train.txt",
+        workdir / "splits/val.txt",
+        workdir / "splits/test.txt",
+        workdir / "splits/split_summary.json",
         workdir / "checkpoints/abmil/best_abmil_classifier.pt",
         workdir / "checkpoints/forecaster/best_wsi_tile_attention_forecaster.pt",
         workdir / "results/wsi_forecaster_pruning.csv",

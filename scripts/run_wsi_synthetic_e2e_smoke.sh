@@ -27,13 +27,14 @@ PRUNED_STORE="${WORKDIR}/features_pruned_keep_${PRUNED_KEEP_RATIO}.h5"
 
 ABMIL_DIR="${WORKDIR}/checkpoints/abmil"
 FORECASTER_DIR="${WORKDIR}/checkpoints/forecaster"
+SPLIT_DIR="${WORKDIR}/splits"
 RESULTS_DIR="${WORKDIR}/results"
 REPORT_DIR="${WORKDIR}/reports/pruning"
 
 FORECASTER_PRUNING_CSV="${RESULTS_DIR}/wsi_forecaster_pruning.csv"
 ABMIL_AGREEMENT_CSV="${RESULTS_DIR}/wsi_abmil_pruning_agreement.csv"
 
-mkdir -p "${WORKDIR}" "${RESULTS_DIR}" "${REPORT_DIR}"
+mkdir -p "${WORKDIR}" "${SPLIT_DIR}" "${RESULTS_DIR}" "${REPORT_DIR}"
 
 echo "[wsi-e2e] workdir=${WORKDIR}"
 echo "[wsi-e2e] creating synthetic feature store"
@@ -53,6 +54,17 @@ echo "[wsi-e2e] validating raw feature store"
   --feature-dim "${FEATURE_DIM}" \
   --require-coords
 
+echo "[wsi-e2e] creating persistent train/val/test split"
+"${PYTHON_BIN}" scripts/split_wsi_feature_store.py \
+  --feature-store "${RAW_STORE}" \
+  --output-dir "${SPLIT_DIR}" \
+  --train-ratio 0.5 \
+  --val-ratio 0.25 \
+  --test-ratio 0.25 \
+  --stratify-label \
+  --seed "${SEED}" \
+  --overwrite
+
 echo "[wsi-e2e] training ABMIL teacher"
 "${PYTHON_BIN}" scripts/train_wsi_abmil.py \
   --feature-store "${RAW_STORE}" \
@@ -66,7 +78,8 @@ echo "[wsi-e2e] training ABMIL teacher"
   --lr 1e-3 \
   --weight-decay 0.0 \
   --seed "${SEED}" \
-  --device "${DEVICE}"
+  --device "${DEVICE}" \
+  --split-dir "${SPLIT_DIR}"
 
 echo "[wsi-e2e] extracting ABMIL attention"
 "${PYTHON_BIN}" scripts/extract_wsi_abmil_attention.py \
@@ -99,12 +112,14 @@ echo "[wsi-e2e] training WSI tile attention forecaster"
   --weight-decay 0.0 \
   --top-k 2 \
   --seed "${SEED}" \
-  --device "${DEVICE}"
+  --device "${DEVICE}" \
+  --split-dir "${SPLIT_DIR}"
 
 echo "[wsi-e2e] evaluating forecaster pruning"
 "${PYTHON_BIN}" scripts/evaluate_wsi_forecaster_pruning.py \
   --feature-store "${ATTENTION_STORE}" \
   --forecaster-checkpoint "${FORECASTER_DIR}/best_wsi_tile_attention_forecaster.pt" \
+  --slide-ids-file "${SPLIT_DIR}/test.txt" \
   --keep-ratios ${KEEP_RATIOS} \
   --output-csv "${FORECASTER_PRUNING_CSV}" \
   --batch-size "${BATCH_SIZE}" \
@@ -116,6 +131,7 @@ echo "[wsi-e2e] evaluating ABMIL full-vs-pruned agreement"
   --feature-store "${ATTENTION_STORE}" \
   --abmil-checkpoint "${ABMIL_DIR}/best_abmil_classifier.pt" \
   --forecaster-checkpoint "${FORECASTER_DIR}/best_wsi_tile_attention_forecaster.pt" \
+  --slide-ids-file "${SPLIT_DIR}/test.txt" \
   --keep-ratios ${KEEP_RATIOS} \
   --output-csv "${ABMIL_AGREEMENT_CSV}" \
   --batch-size "${BATCH_SIZE}" \
@@ -152,6 +168,7 @@ workdir: ${WORKDIR}
 raw_store: ${RAW_STORE}
 attention_store: ${ATTENTION_STORE}
 pruned_store: ${PRUNED_STORE}
+split_dir: ${SPLIT_DIR}
 abmil_checkpoint: ${ABMIL_DIR}/best_abmil_classifier.pt
 forecaster_checkpoint: ${FORECASTER_DIR}/best_wsi_tile_attention_forecaster.pt
 forecaster_pruning_csv: ${FORECASTER_PRUNING_CSV}
