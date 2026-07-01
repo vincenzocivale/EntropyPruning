@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 
 from src.data.wsi.bag import WSIBag
 from src.data.wsi.feature_store import WSIFeatureStore
+from src.data.wsi.paired_feature_store import load_paired_wsi_bag
 
 
 class WSIBagDataset(Dataset, ABC):
@@ -115,3 +116,99 @@ class FeatureStoreWSIBagDataset(WSIBagDataset):
     def __iter__(self) -> Iterator[WSIBag]:
         for slide_id in self.slide_ids:
             yield self.store.read(slide_id)
+
+
+class PairedFeatureStoreWSIBagDataset(WSIBagDataset):
+    """WSI bag dataset backed by an input store and a separate target store.
+
+    Each sample is assembled by ``load_paired_wsi_bag`` (input tile features
+    joined with a target-store importance value by slide id, optionally
+    aligned by coordinates) and returned as an ordinary ``WSIBag`` with
+    ``attention`` set to the target importance. This lets ``pad_wsi_bags``,
+    ``collate_padded_wsi_bags``, and any training loop that consumes
+    ``WSIBag``/``PaddedWSIBatch`` work unchanged on paired stores. The
+    legacy single-store case is supported by passing the same store object
+    as both ``input_store`` and ``target_store``.
+    """
+
+    def __init__(
+        self,
+        input_store: WSIFeatureStore,
+        target_store: WSIFeatureStore,
+        slide_ids: Sequence[str] | None = None,
+        *,
+        alignment_mode: str = "index",
+        require_coords: bool = False,
+        validate_slide_ids: bool = True,
+    ) -> None:
+        if not isinstance(input_store, WSIFeatureStore):
+            raise TypeError(
+                "input_store must implement WSIFeatureStore; "
+                f"got {type(input_store).__name__}."
+            )
+        if not isinstance(target_store, WSIFeatureStore):
+            raise TypeError(
+                "target_store must implement WSIFeatureStore; "
+                f"got {type(target_store).__name__}."
+            )
+
+        if slide_ids is None:
+            resolved_slide_ids = input_store.slide_ids()
+        else:
+            resolved_slide_ids = tuple(slide_ids)
+
+        for index, slide_id in enumerate(resolved_slide_ids):
+            if not isinstance(slide_id, str) or not slide_id:
+                raise ValueError(
+                    "slide_ids must contain non-empty strings; "
+                    f"item {index} is {slide_id!r}."
+                )
+
+        if validate_slide_ids:
+            missing_input = [
+                slide_id for slide_id in resolved_slide_ids if not input_store.exists(slide_id)
+            ]
+            if missing_input:
+                raise KeyError(
+                    "slide_ids not found in input feature store: "
+                    + ", ".join(missing_input[:10])
+                    + (" ..." if len(missing_input) > 10 else "")
+                )
+
+            missing_target = [
+                slide_id for slide_id in resolved_slide_ids if not target_store.exists(slide_id)
+            ]
+            if missing_target:
+                raise KeyError(
+                    "slide_ids not found in target feature store: "
+                    + ", ".join(missing_target[:10])
+                    + (" ..." if len(missing_target) > 10 else "")
+                )
+
+        self.input_store = input_store
+        self.target_store = target_store
+        self.slide_ids = resolved_slide_ids
+        self.alignment_mode = alignment_mode
+        self.require_coords = require_coords
+
+    def __len__(self) -> int:
+        return len(self.slide_ids)
+
+    def _load(self, slide_id: str) -> WSIBag:
+        paired = load_paired_wsi_bag(
+            self.input_store,
+            self.target_store,
+            slide_id,
+            alignment_mode=self.alignment_mode,
+            require_coords=self.require_coords,
+        )
+        return paired.to_wsi_bag()
+
+    def __getitem__(self, index: int) -> WSIBag:
+        if not isinstance(index, int):
+            raise TypeError(f"index must be an int; got {type(index).__name__}.")
+        return self._load(self.slide_ids[index])
+
+    def __iter__(self) -> Iterator[WSIBag]:
+        for slide_id in self.slide_ids:
+            yield self._load(slide_id)
