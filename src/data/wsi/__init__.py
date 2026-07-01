@@ -23,6 +23,7 @@ from src.data.wsi.importance_target_file import (
     read_wsi_importance_target_tensor,
 )
 from src.data.wsi.paired_feature_store import PairedWSIBag, load_paired_wsi_bag
+from src.data.wsi.ranking_store import WSIRankingStore, WSITileRanking
 from src.data.wsi.trident import (
     TridentSlideRecord,
     load_trident_slide_record,
@@ -39,10 +40,12 @@ __all__ = [
     "PaddedWSIBatch",
     "PairedFeatureStoreWSIBagDataset",
     "PairedWSIBag",
+    "WSIRankingStore",
     "TridentSlideRecord",
     "WSIBag",
     "WSIBagDataset",
     "WSIFeatureStore",
+    "WSITileRanking",
     "align_by_coords",
     "collate_padded_wsi_bags",
     "collate_wsi_bags",
