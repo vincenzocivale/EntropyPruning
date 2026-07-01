@@ -174,10 +174,6 @@ def main():
             torch.load(args.classifier_ckpt, map_location=device), strict=False)
         print(f"Checkpoint loaded: missing={len(missing)} unexpected={len(unexpected)}")
 
-    pre = _evaluate(model, val_loader, device, dataset_info)
-    print(f"\nPre fine-tuning val: macro_acc={pre['macro_acc']:.3f}  "
-          f"micro_acc={pre['micro_acc']:.3f}")
-
     # --- W&B ---
     run_name = args.run_name or (
         f"{args.model_name}_multi_prune{args.prune_layer}_keep{int(args.keep_ratio*100)}"
@@ -298,7 +294,6 @@ def main():
         "keep_ratio": args.keep_ratio,
         "train_datasets": registry.train_datasets,
         "holdout_datasets": registry.holdout_datasets,
-        "pre_val_macro_acc": round(pre["macro_acc"], 6),
         "best_val_macro_acc": round(best_val_macro, 6),
         "final_val_macro_acc": round(final_val["macro_acc"], 6),
         "final_val_micro_acc": round(final_val["micro_acc"], 6),
