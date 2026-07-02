@@ -15,6 +15,20 @@ _SCHEMA_VERSION = 1
 _MODEL_TYPE = "ABMILClassifier"
 
 
+def load_trusted_training_checkpoint(
+    path: str | Path,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> Any:
+    """Load a trusted EAF ABMIL checkpoint with full metadata."""
+
+    return torch.load(
+        Path(path),
+        map_location=map_location,
+        weights_only=False,
+    )
+
+
 @dataclass(frozen=True)
 class ABMILClassifierConfig:
     """Serializable config for ``ABMILClassifier``."""
@@ -104,7 +118,7 @@ def load_abmil_classifier_checkpoint(
 ) -> ABMILClassifierCheckpoint:
     """Load an ABMIL classifier checkpoint."""
 
-    payload = torch.load(Path(path), map_location=map_location)
+    payload = load_trusted_training_checkpoint(path, map_location=map_location)
 
     if not isinstance(payload, dict):
         raise TypeError("checkpoint payload must be a dictionary.")

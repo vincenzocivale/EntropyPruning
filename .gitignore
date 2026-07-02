@@ -10,3 +10,9 @@ __pycache__/
 .pytest_cache/
 # Runtime logs
 logs/
+# First real-experiment data and generated run artifacts (large, local-only)
+/datasets/
+/experiments/
+/manifests/
+/splits/
+/trident_jobs/

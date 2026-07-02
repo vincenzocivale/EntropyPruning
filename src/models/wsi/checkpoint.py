@@ -21,6 +21,25 @@ _IMPORTANCE_MODEL_TYPE = "WSITileImportanceForecaster"
 _LOADABLE_MODEL_TYPES = (_ATTENTION_MODEL_TYPE, _IMPORTANCE_MODEL_TYPE)
 
 
+def load_trusted_training_checkpoint(
+    path: str | Path,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> Any:
+    """Load a trusted EAF training checkpoint with full metadata.
+
+    These checkpoints may contain non-tensor metadata/config objects and
+    should only be loaded from trusted local sources produced by this
+    repository.
+    """
+
+    return torch.load(
+        Path(path),
+        map_location=map_location,
+        weights_only=False,
+    )
+
+
 @dataclass(frozen=True)
 class WSITileAttentionForecasterConfig:
     """Serializable config for ``WSITileAttentionForecaster``."""
@@ -110,7 +129,7 @@ def load_wsi_tile_attention_forecaster_checkpoint(
 ) -> WSITileAttentionForecasterCheckpoint:
     """Load a WSI tile attention forecaster checkpoint."""
 
-    payload = torch.load(Path(path), map_location=map_location)
+    payload = load_trusted_training_checkpoint(path, map_location=map_location)
 
     if not isinstance(payload, dict):
         raise TypeError("checkpoint payload must be a dictionary.")
@@ -268,7 +287,7 @@ def load_wsi_tile_importance_forecaster_checkpoint(
     both describe the same architecture.
     """
 
-    payload = torch.load(Path(path), map_location=map_location)
+    payload = load_trusted_training_checkpoint(path, map_location=map_location)
 
     if not isinstance(payload, dict):
         raise TypeError("checkpoint payload must be a dictionary.")

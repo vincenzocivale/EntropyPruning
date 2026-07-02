@@ -15,6 +15,7 @@ if [[ -z "${PYTHON_BIN}" ]]; then
 fi
 
 WORKDIR="${WORKDIR:-/tmp/eaf_wsi_synthetic_e2e}"
+MPLCONFIGDIR="${MPLCONFIGDIR:-${WORKDIR}/.mplconfig}"
 FEATURE_DIM="${FEATURE_DIM:-8}"
 HIDDEN_DIM="${HIDDEN_DIM:-16}"
 N_SLIDES="${N_SLIDES:-8}"
@@ -43,6 +44,8 @@ FORECASTER_PRUNING_CSV="${RESULTS_DIR}/wsi_forecaster_pruning.csv"
 ABMIL_AGREEMENT_CSV="${RESULTS_DIR}/wsi_abmil_pruning_agreement.csv"
 
 mkdir -p "${WORKDIR}" "${SPLIT_DIR}" "${RESULTS_DIR}" "${REPORT_DIR}"
+mkdir -p "${MPLCONFIGDIR}"
+export MPLCONFIGDIR
 
 echo "[wsi-e2e] workdir=${WORKDIR}"
 echo "[wsi-e2e] creating synthetic feature store"

@@ -108,6 +108,7 @@ run_trident_import_smoke.sh
 run_generic_import_smoke.sh
 run_wsi_synthetic_e2e_smoke.sh
 run_wsi_tile_importance_synthetic_smoke.sh
+run_wsi_first_real_experiment_template.sh
 ```
 
 Purpose:
@@ -116,6 +117,8 @@ Purpose:
 fast sanity checks for import paths and end-to-end WSI pipeline
 run_wsi_tile_importance_synthetic_smoke.sh additionally covers the
 paired-store tile-importance pipeline (see docs/wsi_tile_importance_forecasting.md)
+run_wsi_first_real_experiment_template.sh is the non-dataset-specific
+template for the first real paired-store experiment
 ```
 
 These scripts are intentionally committed because tests call them and because they document executable workflows.

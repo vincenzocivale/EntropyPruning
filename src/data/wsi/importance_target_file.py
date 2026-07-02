@@ -34,6 +34,16 @@ _H5_SUFFIXES = {".h5", ".hdf5"}
 _TORCH_SUFFIXES = {".pt", ".pth"}
 
 
+def _load_trusted_torch_artifact(path: Path) -> Any:
+    """Load a trusted local importer artifact that may contain metadata objects."""
+
+    return torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+
 def _require_h5py() -> None:
     if h5py is None:
         raise ImportError("h5py is required to import HDF5 importance targets.")
@@ -124,7 +134,7 @@ def _load_raw(path: Path) -> Any:
     suffix = path.suffix.lower()
 
     if suffix in _TORCH_SUFFIXES:
-        return torch.load(path, map_location="cpu")
+        return _load_trusted_torch_artifact(path)
     if suffix == ".npy":
         return np.load(path, allow_pickle=False)
     if suffix == ".npz":

@@ -7,7 +7,8 @@ the original single-store attention-forecasting pipeline described in
 data contract (`WSIBag`, `H5WSIFeatureStore`) and the end-to-end ABMIL
 pipeline; this document focuses on what changes when the *target* is not
 necessarily ABMIL attention, and when it lives in a store separate from the
-input features.
+input features. For the concrete first real-data runbook, see
+`docs/wsi_first_real_experiment.md`.
 
 ---
 
