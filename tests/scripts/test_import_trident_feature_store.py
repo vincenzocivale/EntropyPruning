@@ -164,6 +164,58 @@ def test_import_trident_feature_store_cli_supports_explicit_dataset_names(tmp_pa
     assert bag.label == 1
 
 
+def test_import_trident_feature_store_cli_squeezes_singleton_multilayer_features(tmp_path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest_path = tmp_path / "manifest.csv"
+    output_path = tmp_path / "features.h5"
+
+    _write_h5_dataset(
+        tmp_path / "features/slide_001.h5",
+        "features",
+        torch.randn(4, 1, 8),
+    )
+    _write_h5_dataset(
+        tmp_path / "coords/slide_001.h5",
+        "coords",
+        torch.tensor([[0, 0], [1, 0], [0, 1], [1, 1]], dtype=torch.long),
+    )
+
+    _write_manifest(
+        manifest_path,
+        [
+            {
+                "slide_id": "slide_001",
+                "features_path": "features/slide_001.h5",
+                "coords_path": "coords/slide_001.h5",
+                "label": "1",
+            },
+        ],
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/import_trident_feature_store.py",
+            "--manifest",
+            str(manifest_path),
+            "--output-feature-store",
+            str(output_path),
+            "--feature-dim",
+            "8",
+        ],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    store = H5WSIFeatureStore(output_path)
+    bag = store.read("slide_001")
+    assert bag.tile_features.shape == (4, 8)
+    assert bag.coords is not None
+    assert bag.coords.shape == (4, 2)
+
+
 def test_import_trident_feature_store_cli_rejects_feature_dim_mismatch(tmp_path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     manifest_path = tmp_path / "manifest.csv"

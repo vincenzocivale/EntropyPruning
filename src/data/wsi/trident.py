@@ -120,12 +120,28 @@ def read_trident_features(
 ) -> torch.Tensor:
     """Read tile features from a TRIDENT-style HDF5 feature file."""
 
-    features = _read_h5_dataset(
-        Path(path),
-        dataset_name=dataset_name,
-        fallback_names=_DEFAULT_FEATURE_DATASET_NAMES,
-        expected_ndim=2,
-    )
+    feature_path = Path(path)
+    try:
+        features = _read_h5_dataset(
+            feature_path,
+            dataset_name=dataset_name,
+            fallback_names=_DEFAULT_FEATURE_DATASET_NAMES,
+            expected_ndim=2,
+        )
+    except ValueError as exc:
+        if "no 2D dataset found" not in str(exc) and "must be 2D" not in str(exc):
+            raise
+        features = _read_h5_dataset(
+            feature_path,
+            dataset_name=dataset_name,
+            fallback_names=_DEFAULT_FEATURE_DATASET_NAMES,
+            expected_ndim=3,
+        )
+        if features.shape[1] != 1:
+            raise ValueError(
+                f"features must be 2D or [n_tiles, 1, feature_dim]; got {tuple(features.shape)}."
+            ) from exc
+        features = features[:, 0, :]
 
     if not torch.is_floating_point(features):
         features = features.to(torch.float32)
