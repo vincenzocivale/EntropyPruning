@@ -12,8 +12,8 @@ class WSIFeatureStore(ABC):
     """Abstract storage backend for WSI bags.
 
     Implementations may use HDF5, Parquet, Zarr, Trident outputs,
-    Patho-Bench manifests, or any other physical representation. Training code
-    should depend on this interface rather than on a specific storage format.
+    per-slide manifests, or another physical representation. Preprocessing and
+    analysis code should depend on this interface rather than a storage format.
     """
 
     @abstractmethod

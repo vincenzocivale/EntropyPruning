@@ -1,8 +1,8 @@
-"""Data contracts for WSI-level bags.
+"""Data contract for preprocessing and label-free WSI analysis.
 
-A WSI bag represents one slide as a variable-length set of tile-level
-features. It is intentionally independent from Thunder, Trident,
-Patho-Bench, MIL models, and any specific storage backend.
+``WSIBag`` deliberately remains compatible with HDF5 stores produced by the
+removed WSI training pipeline.  ``label`` is retained only so existing files can
+be read without migration; the attention/embedding audit never consumes it.
 """
 
 from __future__ import annotations
@@ -22,11 +22,10 @@ class WSIBag:
         tile_features: Tensor of shape ``[n_tiles, feature_dim]``.
         coords: Optional tensor of shape ``[n_tiles, 2]`` or ``[n_tiles, 4]``.
             Common conventions are ``(x, y)`` or ``(x, y, width, height)``.
-        label: Optional slide-level label. Kept deliberately generic because
-            classification, regression, and survival tasks encode labels
-            differently.
-        attention: Optional MIL attention target of shape ``[n_tiles]``.
-            This class validates shape only; it does not normalize attention.
+        label: Legacy slide label retained only for old-store compatibility.
+        attention: Optional tile-level attention signal of shape ``[n_tiles]``.
+            Native multi-axis attention tensors are kept in external artifacts
+            and reduced explicitly through ``reduce_attention_tensor``.
         metadata: Optional free-form metadata. Values should remain lightweight.
     """
 

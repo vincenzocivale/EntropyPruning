@@ -24,20 +24,29 @@ _SLIDES_GROUP = "slides"
 class H5WSIFeatureStore(WSIFeatureStore):
     """HDF5-backed storage for :class:`WSIBag` objects.
 
-    This store is intentionally conservative: it serializes tensors and simple
-    scalar labels, while keeping the training code dependent only on the
-    ``WSIFeatureStore`` interface.
+    Schema version 1 is retained so feature stores and embedded attention
+    signals generated before the WSI cleanup remain directly readable.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         if h5py is None:
             raise ImportError("H5WSIFeatureStore requires h5py to be installed.")
 
         self.path = Path(path)
+        self.read_only = read_only
 
-        with h5py.File(self.path, "a") as handle:
-            handle.attrs.setdefault("schema_version", _SCHEMA_VERSION)
-            handle.require_group(_SLIDES_GROUP)
+        if read_only:
+            if not self.path.exists():
+                raise FileNotFoundError(self.path)
+            with h5py.File(self.path, "r") as handle:
+                if _SLIDES_GROUP not in handle:
+                    raise ValueError(
+                        f"invalid WSI feature store: missing group '{_SLIDES_GROUP}' in {self.path}."
+                    )
+        else:
+            with h5py.File(self.path, "a") as handle:
+                handle.attrs.setdefault("schema_version", _SCHEMA_VERSION)
+                handle.require_group(_SLIDES_GROUP)
 
     def slide_ids(self) -> tuple[str, ...]:
         with h5py.File(self.path, "r") as handle:
@@ -84,6 +93,8 @@ class H5WSIFeatureStore(WSIFeatureStore):
             )
 
     def write(self, bag: WSIBag) -> None:
+        if self.read_only:
+            raise PermissionError(f"feature store is read-only: {self.path}")
         if not isinstance(bag, WSIBag):
             raise TypeError(
                 "H5WSIFeatureStore.write expects a WSIBag; "
