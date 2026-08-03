@@ -1,0 +1,38 @@
+{
+  "dataset": "tcga1000_antibench",
+  "preprocessing": {
+    "magnification": 20,
+    "patch_size_px": 512,
+    "stride_px": 512,
+    "overlap_px": 0,
+    "segmenter": "hest"
+  },
+  "tile_encoder": {
+    "name": "conch_v15",
+    "intermediate_block_index": 1,
+    "stored_embeddings": ["layer2", "final"],
+    "storage_dtype": "float16",
+    "compression": "lzf"
+  },
+  "wsi_models": [
+    {
+      "name": "feather",
+      "model_id": "MahmoodLab/abmil.base.conch_v15.pc108-24k",
+      "native_attention": true
+    },
+    {
+      "name": "titan",
+      "model_id": "MahmoodLab/TITAN",
+      "native_attention": false
+    }
+  ],
+  "analysis": {
+    "primary_knn_k": 32,
+    "knn_sensitivity": [16, 32, 64],
+    "primary_clusters": 8,
+    "cluster_sensitivity": [4, 8, 16],
+    "top_attention_fractions": [0.05, 0.1, 0.2],
+    "discovery_fraction": 0.125,
+    "seed": 17
+  }
+}
