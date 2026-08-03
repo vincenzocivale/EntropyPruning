@@ -12,6 +12,7 @@ __pycache__/
 logs/
 # First real-experiment data and generated run artifacts (large, local-only)
 /datasets/
+/data/
 /experiments/
 /manifests/
 /splits/
