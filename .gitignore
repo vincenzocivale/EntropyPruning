@@ -17,3 +17,4 @@ logs/
 /manifests/
 /splits/
 /trident_jobs/
+artifacts/
