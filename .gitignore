@@ -1,5 +1,19 @@
 /checkpoints/
+checkpoints/
+results/
+reports/
 /wandb/
 __pycache__/
 *.pyc
+*.h5
 .ipynb_checkpoints/
+.pytest_cache/
+# Runtime logs
+logs/
+# First real-experiment data and generated run artifacts (large, local-only)
+/datasets/
+/data/
+/experiments/
+/manifests/
+/splits/
+/trident_jobs/

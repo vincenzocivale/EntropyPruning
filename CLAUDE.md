@@ -113,9 +113,14 @@ notebooks/                     # Analysis and visualization
 
 ## Data & Checkpoint Layout
 
-**Input**: HuggingFace-format dataset split into `train/`, `val/`, `test/` subdirectories.
+`data/` is local-only and ignored by Git. It holds external Thunder data by
+symlink and local TCGA/WSI inputs; raw slides and reusable TRIDENT outputs are
+kept once per cohort, while checkpoints, logs, rankings, and generated WSI
+feature stores are disposable run artifacts. See `docs/data_layout.md` for the
+canonical directory layout and placement rules.
 
-**HDF5 intermediate cache** (`/raid/DATASETS/data_cache/`):
+The tile-level forecaster cache uses the following HDF5 layout:
+
 ```
 {dataset}_forecaster_dataset.h5
 └── /{split}/
