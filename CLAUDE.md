@@ -144,10 +144,15 @@ corpus than the classifier/forecaster pipeline above. The canonical runtime
 root is `$EAF_WSI_ROOT` (see `docs/data_layout.md`).
 
 **The EAF training corpus is HISTAI + GTEx + HEST only. TCGA is explicitly
-excluded from EAF pretraining.** TCGA raw data and its own dataset
-(`tcga_eaf_multicohort_v1`) are preserved on disk and never deleted, but are
-reserved for other uses (ablations, non-EAF experiments) — not for the core
-EAF training run — because many downstream THUNDER benchmarks
+excluded from EAF pretraining.** Raw TCGA slides remain untouched under
+`sources/gdc/tcga` (recoverable there if ever needed), but the curated
+TCGA-derived pretraining datasets (`tcga_eaf_multicohort_v1`,
+`tcga_eaf_thunder_clean_v1`, and the merged `eaf_multisource_clean_v1`) were
+deleted from `$EAF_WSI_ROOT` on 2026-08-07 — they are not kept on disk even
+as an ablation/non-EAF reserve; regenerate from raw via
+`scripts/wsi_data/build_tcga_thunder_clean_inventory.py` and
+`build_eaf_multisource_manifest.py` if a TCGA-inclusive ablation is ever
+needed. TCGA exclusion exists because many downstream THUNDER benchmarks
 (`catalog/benchmark_registry.csv`) are themselves TCGA-derived, so including
 TCGA in EAF pretraining would risk leakage into those evaluations.
 

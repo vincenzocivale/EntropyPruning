@@ -176,7 +176,10 @@ def main() -> None:
         help="Disable cuDNN autotuning for stricter reproducibility",
     )
 
-    parser.add_argument("--output-dir", default="checkpoints/wsi_tile_pruned_online")
+    parser.add_argument(
+        "--output-dir", default=None,
+        help="Defaults to checkpoints/pruned_finetuned/<model-name> (tile-encoder-dependent)",
+    )
     parser.add_argument("--wandb-project", default="eaf-pruned-tile-online")
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
@@ -281,7 +284,11 @@ def main() -> None:
         seed=args.seed,
     )
 
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir = (
+        Path(args.output_dir).expanduser().resolve()
+        if args.output_dir
+        else Path(f"checkpoints/pruned_finetuned/{args.model_name}").resolve()
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     run_name = args.run_name or (
         f"{args.model_name}_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}_online"

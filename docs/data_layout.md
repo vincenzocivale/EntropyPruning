@@ -32,7 +32,11 @@ $EAF_WSI_ROOT/
 │   ├── slides.csv
 │   ├── artifacts.csv
 │   ├── datasets.csv
-│   └── encoders.csv
+│   ├── encoders.csv
+│   ├── benchmark_registry.csv            # THUNDER benchmark registry (see CLAUDE.md)
+│   ├── reserved_wsi_benchmark_projects.txt
+│   ├── thunder_overlap/                  # leakage-guard case lists (live, read by build scripts)
+│   └── _migrations/                      # archived one-off migration provenance (not live state)
 ├── sources/                              # one physical copy of recoverable raw data
 │   ├── gdc/tcga/<cohort>/<diagnostic|tissue>/*.svs
 │   ├── huggingface/hest/...              # existing HEST acquisition
@@ -40,7 +44,9 @@ $EAF_WSI_ROOT/
 │   └── gtex/...                          # new: IDC DICOM series (keep siblings together)
 ├── datasets/
 │   ├── pretraining/                      # task-agnostic EAF training corpora
-│   │   ├── tcga_eaf_multicohort_v1/      # existing; online tile-EAF training
+│   │   ├── tcga_eaf_multicohort_v1/      # DELETED 2026-08-07 (TCGA excluded from EAF
+│   │   │                                 # pretraining); shape shown below is illustrative,
+│   │   │                                 # see hest_eaf_thunder_clean_v1/ for a live example
 │   │   │   ├── dataset.yaml
 │   │   │   ├── manifests/
 │   │   │   │   ├── slides.csv
@@ -66,6 +72,7 @@ $EAF_WSI_ROOT/
 │   └── downstream/                       # labelled benchmark bank, unseen by strict pretraining
 │       ├── tile_level/<benchmark>/
 │       └── wsi_level/<benchmark>/
+│           └── eaf_thunder_nsclc_ood_clean_v1/  # CPTAC/NSCLC-OOD eval inventory (IDC)
 ├── caches/                               # NEW: frozen teacher outputs for offline EAF training
 │   ├── tile_eaf/<dataset>/<tile_encoder>/<cache_id>/
 │   └── wsi_eaf/<dataset>/<tile_encoder>__<wsi_encoder>/<cache_id>/
@@ -73,11 +80,18 @@ $EAF_WSI_ROOT/
 │   ├── histai/
 │   └── gtex/
 ├── checkpoints/
+│   ├── tile_eaf/<tile_encoder>/<run>/            # EAF forecaster, tile-encoder-dependent
+│   ├── wsi_eaf/<tile_encoder>__<wsi_encoder>/<run>/  # reserved, no training script yet
+│   └── pruned_finetuned/<tile_encoder>/<run>/    # FM fine-tuned after pruning (LoRA adapters)
 ├── results/
 ├── logs/
-├── cache/                                # legacy scratch/thumbnail cache (unrelated to caches/)
 └── quarantine/
 ```
+
+The legacy singular `cache/` directory (pre-refactor teacher cache,
+`tile_eaf/titan_src02_tgtlast_wsi/`) has been retired and deleted (2026-08-07)
+— it held throwaway trial output, not a reusable asset. `caches/` (plural)
+is the only teacher-cache root going forward.
 
 Raw WSI files have exactly one physical copy under `sources/`. Dataset views
 and compatibility paths are symlinks; scripts must not copy slides into the
@@ -116,12 +130,17 @@ labels — is kept unseen by the strict EAF pretraining corpus; see
 ## Canonical slide manifest
 
 All pretraining/downstream datasets share the `SlideRecord` schema
-(`src/data/wsi/manifest.py`). Online tile training on the existing TCGA corpus
-reads:
+(`src/data/wsi/manifest.py`). Online tile-EAF training reads the strict
+(TCGA-excluded) corpus:
 
 ```text
-$EAF_WSI_ROOT/datasets/pretraining/tcga_eaf_multicohort_v1/manifests/slides.csv
+$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1/manifests/slides.csv
 ```
+
+(build first with `python scripts/eaf.py data build-strict`; the old
+`tcga_eaf_multicohort_v1` manifest this section once pointed to was deleted
+2026-08-07 along with the rest of the TCGA-derived pretraining corpora — see
+"WSI EAF Training Data Policy" in `CLAUDE.md`)
 
 Required columns are:
 
@@ -180,23 +199,32 @@ resizing a 512 px field to a 224/256 px model input.
 The repository intentionally supports two complementary regimes; they are not
 in conflict, they cover different corpus scales:
 
-- **Online (existing, `tcga_eaf_multicohort_v1`).** Tile-level EAF training and
-  pruning-aware tile-encoder adaptation do **not** materialize per-tile source
-  embeddings, per-tile teacher attention maps, per-dataset forecaster HDF5
-  caches, or full duplicated fine-tuned backbones. Tiles are read from WSI
-  files on demand; source tokens, teacher attention, and full-teacher
-  embeddings exist only in GPU memory for the current batch. The only
-  persistent training outputs are small, reproducible run artifacts:
+- **Online (existing, reads from `datasets/pretraining/eaf_wsi_pretrain_strict_v1`
+  once built — TCGA excluded).** Tile-level EAF training and pruning-aware
+  tile-encoder adaptation do **not** materialize per-tile source embeddings,
+  per-tile teacher attention maps, per-dataset forecaster HDF5 caches, or full
+  duplicated fine-tuned backbones. Tiles are read from WSI files on demand;
+  source tokens, teacher attention, and full-teacher embeddings exist only in
+  GPU memory for the current batch. The only persistent training outputs are
+  small, reproducible run artifacts, namespaced by tile encoder (mirrors the
+  `caches/` convention below):
 
   ```text
-  checkpoints/wsi_tile_eaf_online/
+  checkpoints/tile_eaf/<tile_encoder>/
     best_<run>.pt
     summary_<run>.json
 
-  checkpoints/wsi_tile_pruned_online/
+  checkpoints/pruned_finetuned/<tile_encoder>/
     best_<run>_adapter.pt       # trainable LoRA tensors only
     summary_<run>.json
   ```
+
+  A future `checkpoints/wsi_eaf/<tile_encoder>__<wsi_encoder>/` namespace is
+  reserved for slide-level (MIL) EAF forecaster checkpoints once that training
+  script exists; none has been trained yet. The pre-2026-08-07 checkpoint
+  (`wsi_tile_eaf_online/conch15_eaf_final_...`) was trained on the now-deleted
+  TCGA-containing `eaf_multisource_clean_v1` corpus and has been deleted along
+  with it — do not reference it.
 
   Metrics, sampling coverage, throughput, early-stopping state, and peak CUDA
   memory are logged to Weights & Biases (`--wandb-mode offline`/`disabled`

@@ -15,7 +15,7 @@ CATALOG_ROOT = WSI_ROOT / "catalog"
 
 DATASET_ROOT = (
     WSI_ROOT
-    / "datasets/pretraining"
+    / "datasets/downstream/wsi_level"
     / "eaf_thunder_nsclc_ood_clean_v1"
 )
 

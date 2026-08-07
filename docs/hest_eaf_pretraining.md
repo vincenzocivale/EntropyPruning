@@ -125,7 +125,15 @@ with the same canonical EAF settings:
 After TRIDENT finishes, rerun `audit_materialize_hest_eaf.py`; it refreshes
 `coords_available` in the canonical manifest.
 
-## Build multisource EAF manifest
+## Build multisource EAF manifest (DEPRECATED — do not use for EAF training)
+
+> **2026-08-07: superseded.** This mixed TCGA into the pretraining corpus via
+> `--hest-share`, which conflicts with the "TCGA excluded from EAF
+> pretraining" policy (see `CLAUDE.md`, "WSI EAF Training Data Policy"). Its
+> output dataset (`eaf_multisource_clean_v1`) was deleted. Use
+> `python scripts/eaf.py data build-strict` (HISTAI + GTEx + HEST, TCGA
+> excluded by construction) instead. Kept here only as a historical record of
+> the pre-refactor online-training corpus.
 
 ```bash
 python scripts/wsi_data/build_eaf_multisource_manifest.py \

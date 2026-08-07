@@ -57,7 +57,12 @@ WSI per epoch improves cohort and patient coverage.
 ```bash
 export EAF_ROOT=/data2/home/vcivale/projects/imaging/EAF
 export EAF_WSI_ROOT=/data2/home/vcivale/projects/imaging/data/WSI
-export DATASET_ROOT=$EAF_WSI_ROOT/datasets/pretraining/tcga_eaf_multicohort_v1
+export DATASET_ROOT=$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1
+# ^ HISTAI+GTEx+HEST union, TCGA excluded by policy (see CLAUDE.md "WSI EAF
+#   Training Data Policy"). Build it first with:
+#   python scripts/eaf.py data build-strict --data-root "$EAF_WSI_ROOT"
+#   The old tcga_eaf_multicohort_v1 / eaf_multisource_clean_v1 corpora (TCGA-
+#   containing) were deleted 2026-08-07; do not point EAF training at TCGA.
 
 cd "$EAF_ROOT"
 
@@ -75,8 +80,9 @@ python scripts/train_wsi_tile_eaf_online.py \
   --num-workers 8 \
   --amp-dtype bf16 \
   --early-stopping-patience 6 \
-  --wandb-project eaf-tile-online \
-  --output-dir checkpoints/wsi_tile_eaf_online
+  --wandb-project eaf-tile-online
+  # --output-dir defaults to checkpoints/tile_eaf/<thunder-model-name>
+  # (tile-encoder-dependent); pass --output-dir to override.
 ```
 
 Use `--teacher-checkpoint` only when the THUNDER encoder must be initialized
@@ -109,7 +115,7 @@ python scripts/finetune_wsi_tile_encoder_pruned_online.py \
   --model-name <same-thunder-model-name> \
   --manifest "$DATASET_ROOT/manifests/slides.csv" \
   --data-root "$EAF_WSI_ROOT" \
-  --forecaster-ckpt checkpoints/wsi_tile_eaf_online/best_<run>.pt \
+  --forecaster-ckpt checkpoints/tile_eaf/<thunder-model-name>/best_<run>.pt \
   --prune-layer 2 \
   --keep-ratio 0.10 \
   --tile-size-at-target-mag <encoder-tile-size> \
@@ -122,8 +128,9 @@ python scripts/finetune_wsi_tile_encoder_pruned_online.py \
   --amp-dtype bf16 \
   --gradient-checkpointing \
   --early-stopping-patience 5 \
-  --wandb-project eaf-pruned-tile-online \
-  --output-dir checkpoints/wsi_tile_pruned_online
+  --wandb-project eaf-pruned-tile-online
+  # --output-dir defaults to checkpoints/pruned_finetuned/<thunder-model-name>
+  # (tile-encoder-dependent); pass --output-dir to override.
 ```
 
 This stage is not supervised classification fine-tuning. It minimizes the
