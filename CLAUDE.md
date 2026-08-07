@@ -136,6 +136,28 @@ forecaster/forecaster_src{src:02d}_tgt{tgt:02d}.pt
 pruned_finetuned/pruned_models/
 ```
 
+## WSI EAF Training Data Policy
+
+The separate WSI-level EAF work (Tile-EAF / WSI-EAF, `src/wsi_pipeline/`,
+`src/data/wsi/`, `scripts/eaf.py`) uses a different, larger-scale pretraining
+corpus than the classifier/forecaster pipeline above. The canonical runtime
+root is `$EAF_WSI_ROOT` (see `docs/data_layout.md`).
+
+**The EAF training corpus is HISTAI + GTEx + HEST only. TCGA is explicitly
+excluded from EAF pretraining.** TCGA raw data and its own dataset
+(`tcga_eaf_multicohort_v1`) are preserved on disk and never deleted, but are
+reserved for other uses (ablations, non-EAF experiments) — not for the core
+EAF training run — because many downstream THUNDER benchmarks
+(`catalog/benchmark_registry.csv`) are themselves TCGA-derived, so including
+TCGA in EAF pretraining would risk leakage into those evaluations.
+
+`eaf_wsi_pretrain_strict_v1` (`src/data/wsi/corpora.py:build_strict_corpus`,
+`python scripts/eaf.py data build-strict`) is the logical union of HISTAI +
+GTEx + HEST — no duplicated pixels, TCGA excluded by construction via a
+leakage guard — and is the manifest that EAF training should read. See
+`docs/offline_eaf_pipeline.md` and `docs/refactor_migration.md` for the
+offline teacher-cache pipeline and the full dataset-layout rationale.
+
 ## Key Design Details
 
 - **Layer indexing**: 0-based; layer 23 is the final transformer block; layer 2 is the canonical early prune point used in ablations.

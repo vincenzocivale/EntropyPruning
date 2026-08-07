@@ -166,18 +166,23 @@ tile slice.
 
 ## Minimal pipeline wrapper
 
-For repeated analyses, configure and run the label-free wrapper:
+`scripts/run_wsi_attention_embedding_audit.sh` (an env-var wrapper with no test
+coverage of its own) was removed in the offline-EAF refactor; call
+`scripts/analyze_wsi_attention_embeddings.py` directly instead — it is the part
+that is actually tested (`tests/scripts/test_analyze_wsi_attention_embeddings.py`).
+If the feature store does not exist yet, import it first with
+`scripts/import_trident_feature_store.py --manifest ... --output-feature-store ...`.
 
 ```bash
-FEATURE_STORE=data/wsi/early_features.h5 \
-TRIDENT_MANIFEST=data/wsi/manifests/early_features.csv \
-ATTENTION_MANIFEST=data/wsi/manifests/native_attention.csv \
-OUTPUT_DIR=results/wsi_attention_audit/gigapath_final \
-ALIGNMENT=coords \
-EXTRA_AUDIT_ARGS='--tile-axis 3 --tile-slice-start 1 --attention-select 0=-1 --attention-select 2=0' \
-bash scripts/run_wsi_attention_embedding_audit.sh
+python scripts/analyze_wsi_attention_embeddings.py \
+  --feature-store data/wsi/early_features.h5 \
+  --output-dir results/wsi_attention_audit/gigapath_final \
+  --alignment coords \
+  --attention-normalization auto \
+  --attention-manifest data/wsi/manifests/native_attention.csv \
+  --tile-axis 3 --tile-slice-start 1 \
+  --attention-select 0=-1 --attention-select 2=0
 ```
 
-When the HDF5 feature store already exists, `TRIDENT_MANIFEST` is optional and
-no preprocessing is repeated. The wrapper does not call Patho-Bench, train a
-model, read labels, or create a pruned store.
+This does not call Patho-Bench, train a model, read labels, or create a pruned
+store.

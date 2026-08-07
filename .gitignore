@@ -28,4 +28,8 @@ artifacts/
 /pretraining/
 /quarantine/
 /cache/
+# Offline EAF refactor: caches/ (plural, teacher caches) and archives/ (cold
+# pixel archives) are new canonical $EAF_WSI_ROOT dirs (docs/data_layout.md).
+/caches/
+/archives/
 .eaf-tmp/

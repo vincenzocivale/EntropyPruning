@@ -1,5 +1,12 @@
 # EAF-WSI strict pretraining dataset update
 
+> **Preferred entry point:** `python scripts/eaf.py data ...` (see AGENTS.md
+> "Operational entry point"). `scripts/wsi_prepare_strict_pretraining.py` is
+> kept only as a thin, deprecated compatibility wrapper around the same
+> `src/data/wsi/corpora.py` functions — both call the same one
+> HISTAI/GTEx/HEST planner. The commands below still work through either
+> entry point; `eaf.py` equivalents are noted per step.
+
 This update is intentionally **additive**. Existing TCGA raw slides, TRIDENT
 coordinates/features, manifests, and other derived products are never moved or
 deleted. TCGA is registered as a preserved source and excluded from the
@@ -36,16 +43,21 @@ $EAF_WSI_ROOT/
         manifests/
           plan.csv                        # frozen HISTAI acquisition plan
           slides.csv                       # downloaded HISTAI slides
+          histai_subset_access.json        # per-subset gate status (accessible/not, no failure)
         views/
           raw_flat/*.tiff -> ../../../../sources/histai/...
+      hest_eaf_wsi_v1/                  # new: lightweight HEST registration (no copy)
       gtex_eaf_wsi_v1/                  # later, after smoke test
       eaf_wsi_pretrain_strict_v1/       # combined pretraining view
         dataset.yaml
-        registry.json
         manifests/
-          hest_existing.csv
           slides.csv                      # union of histai + hest, with a `split` column
+          provenance.json                  # sources included, counts, tcga-exclusion root, seed
 ```
+
+There is no `registry.json`/`init` step anymore: `eaf.py data build-strict`
+(or the wrapper's `build`) takes `--tcga-root` directly and defaults it to
+`<data-root>/sources/gdc/tcga`, the same default the old `init` used.
 
 Splits are a `split` column on `manifests/slides.csv`, the same convention the
 online tile-training loader already understands (see "Canonical slide
@@ -61,27 +73,32 @@ hf auth login
 HISTAI is gated. Accept the access terms for `histai/HISTAI-metadata` and the
 specialized HISTAI repositories before launching the WSI download.
 
-## 1. Initialize without touching TCGA
+## 1. Initialize the runtime layout (TCGA is never touched)
 
 ```bash
-python scripts/wsi_prepare_strict_pretraining.py init \
-  --data-root "$EAF_WSI_ROOT" \
-  --hest-root "$HEST_EXISTING_ROOT"
+python scripts/eaf.py layout --data-root "$EAF_WSI_ROOT"
 ```
 
-`--data-root` defaults to `$EAF_WSI_ROOT` if that env var is set. `--tcga-root`
+`--data-root` defaults to `$EAF_WSI_ROOT` if that env var is set. This only
+creates the canonical empty directories (`sources/`, `datasets/{pretraining,
+downstream}/`, `caches/`, `archives/`, `checkpoints/`, `results/`, `logs/`) if
+missing; it never reads, moves, or deletes existing data. TCGA-leakage
+protection is applied later at `build-strict` time via `--tcga-root`, which
 defaults to `$EAF_WSI_ROOT/sources/gdc/tcga` (the canonical location) and only
-needs to be passed if TCGA's raw slides live somewhere else.
-
-`registry.json` records TCGA as `preserved_not_in_strict_v1`. No `rm`, `mv`, or
-copy operation is performed on the existing datasets.
+needs to be passed explicitly if TCGA's raw slides live somewhere else.
 
 ## 2. Freeze the HISTAI acquisition plan
 
 ```bash
-python scripts/wsi_prepare_strict_pretraining.py plan-histai \
-  --data-root "$EAF_WSI_ROOT"
+python scripts/eaf.py data plan-histai --data-root "$EAF_WSI_ROOT"
 ```
+
+Planning is incremental and gate-resilient: subsets already present in
+`manifests/plan.csv` are not re-listed on a repeat call (pass `--force` to
+override), and a subset whose HF repo is not yet accessible (gate not
+accepted) is skipped — recorded in `manifests/histai_subset_access.json` — 
+instead of failing the whole plan. Re-run the same command later, after
+accepting more gates, to pick up newly accessible subsets.
 
 The default plan contains exactly 8,000 H&E WSIs:
 
@@ -104,7 +121,7 @@ round before taking a second slide from any case.
 
 ```bash
 export HF_XET_HIGH_PERFORMANCE=1
-nohup python scripts/wsi_prepare_strict_pretraining.py download-histai \
+nohup python scripts/eaf.py data download-histai \
   --data-root "$EAF_WSI_ROOT" \
   --workers 8 \
   > logs/histai_strict_v1_download.log 2>&1 &
@@ -119,10 +136,14 @@ dataset, matching the `tcga_eaf_multicohort_v1/views/raw_flat` convention.
 ## 4. Register current HEST without copying it
 
 ```bash
-python scripts/wsi_prepare_strict_pretraining.py scan-hest \
+python scripts/eaf.py data scan-hest \
   --data-root "$EAF_WSI_ROOT" \
   --hest-root "$HEST_EXISTING_ROOT"
 ```
+
+This is a separate, lightweight registration (`hest_eaf_wsi_v1`) from the
+existing, more elaborate `hest_eaf_thunder_clean_v1` corpus; it does not touch
+or replace it.
 
 The scan prefers files under `wsis/` or `raw_wsi/` and excludes thumbnails,
 spatial plots, tissue masks, patches, TRIDENT outputs, and features.
@@ -134,14 +155,14 @@ is intended for acquisition/preprocessing, not the final leakage audit.
 ## 5. Build strict acquisition manifest and internal splits
 
 ```bash
-python scripts/wsi_prepare_strict_pretraining.py build \
-  --data-root "$EAF_WSI_ROOT"
+python scripts/eaf.py data build-strict --data-root "$EAF_WSI_ROOT"
 ```
 
-The builder refuses any path resolving below the registered TCGA root. It
-writes a single `manifests/slides.csv` with a `split` column carrying 90/5/5
-group-level train/validation/holdout partitions for unsupervised EAF
-development.
+The builder refuses any path resolving below `--tcga-root` (default
+`$EAF_WSI_ROOT/sources/gdc/tcga`). It writes a single `manifests/slides.csv`
+with a `split` column carrying 90/5/5 group-level train/validation/holdout
+partitions for unsupervised EAF development, plus `manifests/provenance.json`
+recording per-source counts, the split seed, and the excluded TCGA root.
 
 ## 6. GTEx: smoke test before bulk acquisition
 
