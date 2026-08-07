@@ -19,6 +19,14 @@ def main() -> int:
     parser.add_argument("--patch-size", type=int, default=512)
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--custom-list-of-wsis", type=Path)
+    parser.add_argument(
+        "--temp-dir",
+        type=Path,
+        help=(
+            "Temporary directory for TRIDENT/PyTorch workers. Defaults to <job-dir>/tmp "
+            "when its path is short enough for Unix sockets, otherwise .eaf-tmp in the current directory."
+        ),
+    )
     parser.add_argument("--no-search-nested", action="store_true")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--remove-artifacts", action="store_true")
@@ -35,6 +43,7 @@ def main() -> int:
         patch_size=args.patch_size,
         overlap=args.overlap,
         custom_list_of_wsis=args.custom_list_of_wsis,
+        temp_dir=args.temp_dir,
         search_nested=not args.no_search_nested,
         remove_artifacts=args.remove_artifacts,
         remove_penmarks=args.remove_penmarks,

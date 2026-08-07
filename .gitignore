@@ -18,3 +18,14 @@ logs/
 /splits/
 /trident_jobs/
 artifacts/
+# Canonical WSI store dirs (docs/data_layout.md); belong under $EAF_WSI_ROOT,
+# not inside the repo, but ignore them here too in case a script is ever run
+# with --data-root pointed at the repo root.
+/sources/
+/runs/
+/catalog/
+/views/
+/pretraining/
+/quarantine/
+/cache/
+.eaf-tmp/

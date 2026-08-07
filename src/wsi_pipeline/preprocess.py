@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class TridentConfig:
     search_nested: bool = True
     remove_artifacts: bool = False
     remove_penmarks: bool = False
+    temp_dir: Path | None = None
 
 
 def _base_command(config: TridentConfig) -> list[str]:
@@ -70,9 +72,22 @@ def build_trident_commands(config: TridentConfig, stages: Sequence[str]) -> list
 
 def run_trident_preprocessing(config: TridentConfig, stages: Sequence[str], *, dry_run: bool = False) -> None:
     config.job_dir.mkdir(parents=True, exist_ok=True)
+    default_temp_dir = config.job_dir / "tmp"
+    # PyTorch multiprocessing creates AF_UNIX sockets below TMPDIR.  Their paths
+    # are limited to roughly 108 bytes on Linux, so deeply nested job directories
+    # need a shorter location.
+    if config.temp_dir is not None:
+        temp_dir = config.temp_dir
+    elif len(str(default_temp_dir)) <= 70:
+        temp_dir = default_temp_dir
+    else:
+        temp_dir = Path.cwd() / ".eaf-tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment.update({"TMPDIR": str(temp_dir), "TMP": str(temp_dir), "TEMP": str(temp_dir)})
     commands = build_trident_commands(config, stages)
     for command in tqdm(commands, desc="TRIDENT stages", unit="stage"):
         printable = shlex.join(command)
         print(f"[eaf-wsi] {printable}", flush=True)
         if not dry_run:
-            subprocess.run(command, cwd=config.trident_repo, check=True)
+            subprocess.run(command, cwd=config.trident_repo, env=environment, check=True)

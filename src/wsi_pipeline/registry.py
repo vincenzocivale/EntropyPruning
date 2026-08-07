@@ -17,7 +17,15 @@ class SlideEntry:
 
 def _resolve(value: str, root: Path) -> Path:
     path = Path(value).expanduser()
-    return path if path.is_absolute() else (root / path).resolve()
+    if path.is_absolute():
+        return path
+    manifest_relative = root / path
+    if manifest_relative.exists():
+        return manifest_relative.resolve()
+    collection_relative = root.parent / path
+    if collection_relative.exists():
+        return collection_relative.resolve()
+    return manifest_relative.resolve()
 
 
 def load_slides(path: Path) -> list[SlideEntry]:

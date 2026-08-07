@@ -6,10 +6,13 @@ class ThunderBackboneAdapter:
     Wraps a timm-based backbone from Thunder's get_model_from_name and exposes
     uniform attributes and accessors for EAF's 3-phase pipeline.
 
-    Supports timm-based ViT models (standard Block with Attention):
-      uni, uni2h, hoptimus0, hoptimus1, virchow, virchow2, h0mini,
-      kaiko_vit*, dinov2base, dinov2large.
-    Raises NotImplementedError for HuggingFace-based models (phikon, hibou).
+    Supports timm-based ViT models (standard Block with Attention), including
+    models exposed directly and wrappers used by THUNDER. In particular,
+    CONCH v1.5 is registered as ``titan`` and exposes its ViT as ``model.trunk``;
+    CONCH v1 exposes the timm trunk as ``model.visual.trunk``.
+
+    Raises NotImplementedError for backbones whose transformer cannot be
+    resolved to a standard timm VisionTransformer.
 
     Args:
         model: raw backbone from get_model_from_name (first element of the tuple).
@@ -22,18 +25,20 @@ class ThunderBackboneAdapter:
     """
 
     def __init__(self, model: nn.Module):
-        if not self._detect_timm(model):
+        core_model = self._resolve_timm(model)
+        if core_model is None:
             raise NotImplementedError(
-                f"ThunderBackboneAdapter: '{type(model).__name__}' is not a supported "
-                "timm VisionTransformer. Supported: uni, uni2h, hoptimus0/1, "
-                "virchow, virchow2, h0mini, kaiko_vit*, dinov2base, dinov2large. "
-                "HuggingFace-based models (phikon, hibou) are not yet supported."
+                f"ThunderBackboneAdapter: '{type(model).__name__}' does not expose "
+                "a supported timm VisionTransformer at the model root, .trunk, "
+                "or .visual.trunk. HuggingFace-native models such as phikon and "
+                "hibou are not yet supported."
             )
-        self.model = model
-        self.embed_dim: int = model.embed_dim
-        self.n_blocks: int = len(model.blocks)
-        self.num_prefix_tokens: int = model.num_prefix_tokens
-        self.n_patches: int = model.patch_embed.num_patches
+        self.wrapper = model
+        self.model = core_model
+        self.embed_dim: int = core_model.embed_dim
+        self.n_blocks: int = len(core_model.blocks)
+        self.num_prefix_tokens: int = core_model.num_prefix_tokens
+        self.n_patches: int = core_model.patch_embed.num_patches
 
     @staticmethod
     def _detect_timm(model: nn.Module) -> bool:
@@ -44,6 +49,17 @@ class ThunderBackboneAdapter:
             and hasattr(model.patch_embed, "num_patches")
             and hasattr(model, "num_prefix_tokens")
         )
+
+    @classmethod
+    def _resolve_timm(cls, model: nn.Module) -> nn.Module | None:
+        candidates = [model, getattr(model, "trunk", None)]
+        visual = getattr(model, "visual", None)
+        if visual is not None:
+            candidates.append(getattr(visual, "trunk", None))
+        for candidate in candidates:
+            if isinstance(candidate, nn.Module) and cls._detect_timm(candidate):
+                return candidate
+        return None
 
     def get_blocks(self):
         """Returns the list of transformer blocks (timm: model.blocks)."""

@@ -291,3 +291,115 @@ def build_multi_thunder_train_loaders(
         DataLoader(ConcatDataset(val_dsets), shuffle=False, **kw),
         dataset_info,
     )
+
+
+def compute_dataset_balanced_weights(dataset_lengths: list[int]) -> torch.Tensor:
+    """Return label-agnostic weights with equal mass for every dataset.
+
+    Unlike the legacy THUNDER classifier sampler, these weights never inspect
+    class labels.  A dataset containing ``n`` tiles assigns weight ``1 / n`` to
+    each tile, so every dataset has total sampling mass one.
+    """
+    if not dataset_lengths:
+        raise ValueError("dataset_lengths must contain at least one dataset")
+    if any(length <= 0 for length in dataset_lengths):
+        raise ValueError("all THUNDER datasets must contain at least one sample")
+    return torch.cat([
+        torch.full((length,), 1.0 / float(length), dtype=torch.double)
+        for length in dataset_lengths
+    ])
+
+
+def build_multi_thunder_split_loader(
+    dataset_names: list[str],
+    base_data_folder: str,
+    transform,
+    split: str,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    sampler_mode: str = "dataset_balanced",
+    drop_last: bool = False,
+    seed: int = 42,
+) -> tuple[DataLoader, dict]:
+    """Build an online, label-agnostic THUNDER loader for one split.
+
+    The loader yields ``(image, label, dataset_idx)``. Labels are retained only
+    because :class:`thunder.utils.data.PatchDataset` exposes them; the online
+    EAF trainer ignores them completely.
+
+    ``sampler_mode='dataset_balanced'`` gives every dataset equal expected mass
+    per epoch. ``sampler_mode='proportional'`` performs ordinary shuffled
+    sampling and therefore weights datasets by their number of tiles.
+    Validation and test loaders are always deterministic and unshuffled.
+    """
+    if split not in {"train", "val", "test"}:
+        raise ValueError(f"Unsupported THUNDER split: {split}")
+    if not dataset_names:
+        raise ValueError("dataset_names must contain at least one dataset")
+    if len(set(dataset_names)) != len(dataset_names):
+        raise ValueError("dataset_names contains duplicates")
+    if sampler_mode not in {"dataset_balanced", "proportional"}:
+        raise ValueError(
+            "sampler_mode must be one of: dataset_balanced, proportional"
+        )
+
+    datasets: list[Dataset] = []
+    dataset_info: dict[int, dict] = {}
+    lengths: list[int] = []
+
+    for dataset_idx, name in enumerate(dataset_names):
+        data = get_data(name, base_data_folder)
+        meta = _dataset_meta(name, base_data_folder, data)
+        patch_dataset = PatchDataset(
+            images=data[split]["images"],
+            labels=data[split]["labels"],
+            transform=transform,
+            task_type="linear_probing",
+            dataset_name=name,
+            base_data_folder=base_data_folder,
+            embeddings_folder=None,
+            image_pre_loading=False,
+            embedding_pre_loading=False,
+            div_patches=False,
+            h5_format=meta["h5_format"],
+        )
+        tagged = TaggedTupleDataset(patch_dataset, dataset_idx)
+        if len(tagged) == 0:
+            raise ValueError(f"THUNDER dataset '{name}' has an empty {split} split")
+        datasets.append(tagged)
+        lengths.append(len(tagged))
+        dataset_info[dataset_idx] = {
+            "name": name,
+            "n_classes": meta["n_classes"],
+            "class_names": meta["class_names"],
+            "n_samples": len(tagged),
+            "split": split,
+        }
+
+    combined = ConcatDataset(datasets)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+        drop_last=drop_last,
+    )
+
+    if split == "train" and sampler_mode == "dataset_balanced":
+        sampler = WeightedRandomSampler(
+            compute_dataset_balanced_weights(lengths),
+            num_samples=sum(lengths),
+            replacement=True,
+            generator=generator,
+        )
+        loader = DataLoader(combined, sampler=sampler, **kwargs)
+    elif split == "train":
+        loader = DataLoader(
+            combined, shuffle=True, generator=generator, **kwargs
+        )
+    else:
+        loader = DataLoader(combined, shuffle=False, **kwargs)
+
+    return loader, dataset_info
