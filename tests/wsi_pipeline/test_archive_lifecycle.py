@@ -32,7 +32,6 @@ def _write_tile_cache(path: Path, n: int = 3) -> Path:
     with TileCacheWriter(path, spec, slide_id="s1", case_id="c1") as writer:
         writer.append(
             coords=np.zeros((n, 2), dtype="int32"),
-            early_tokens=np.zeros((n, 4, 8), dtype="float16"),
             final_attention=np.zeros((n, 4), dtype="float16"),
             tile_embeddings=np.zeros((n, 8), dtype="float16"),
         )

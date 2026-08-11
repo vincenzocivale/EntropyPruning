@@ -20,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thunder.models.pretrained_models import get_model_from_name
 from src.data.wsi_tile_stream import build_online_tile_loaders, load_wsi_manifest
+from src.wsi_pipeline.cache_index import read_tile_cache_index
+from src.wsi_pipeline.cache_io import validate_cache
+from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
 from src.models import AttentionForecaster, ThunderBackboneAdapter
 from src.models.online_tile_eaf import OnlineAttentionTeacher, load_checkpoint_flexibly
 from src.utils import set_seed
@@ -74,6 +77,7 @@ def _run_epoch(
     log_every: int,
     global_step: int,
     use_wandb: bool,
+    cached_targets: bool,
 ) -> tuple[dict[str, float], int]:
     forecaster.train(train)
     total = 0
@@ -83,10 +87,14 @@ def _run_epoch(
         optimizer.zero_grad(set_to_none=True)
 
     iterator = tqdm(loader, leave=False, desc="train" if train else "val")
-    for batch_index, (images, _) in enumerate(iterator):
+    for batch_index, (images, batch_target) in enumerate(iterator):
         images = images.to(device, non_blocking=True)
         with torch.no_grad(), _autocast(device, amp_dtype):
-            source_tokens, target_attention = teacher.extract(images)
+            if cached_targets:
+                source_tokens = teacher.extract_early(images)
+                target_attention = batch_target.to(device, non_blocking=True)
+            else:
+                source_tokens, target_attention = teacher.extract(images)
         with torch.set_grad_enabled(train), _autocast(device, amp_dtype):
             logits = forecaster(source_tokens)
             kl = F.kl_div(
@@ -163,6 +171,11 @@ def main() -> None:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--teacher-checkpoint", default=None)
+    parser.add_argument(
+        "--target-cache-index",
+        default=None,
+        help="Validated index from `eaf.py cache index-tile`; enables compact-cache training",
+    )
     parser.add_argument("--source-layer", type=int, default=2)
     parser.add_argument("--target-layer", type=int, default=None)
     parser.add_argument("--hidden", type=int, default=256)
@@ -225,6 +238,16 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=25)
     args = parser.parse_args()
 
+    if (
+        args.target_cache_index
+        and args.tile_size_at_target_mag is not None
+        and args.tile_size_at_target_mag != args.default_patch_size
+    ):
+        raise ValueError(
+            "Compact-cache training must reread the exact cache-time field of view; "
+            "omit --tile-size-at-target-mag or set it equal to --default-patch-size"
+        )
+
     set_seed(args.seed)
     if not args.deterministic:
         torch.backends.cudnn.deterministic = False
@@ -276,9 +299,37 @@ def main() -> None:
         )
     resolved_train_wsis -= resolved_train_wsis % args.slides_per_batch
     resolved_train_wsis = max(args.slides_per_batch, resolved_train_wsis)
-    train_loader, val_loader, train_sampler, val_sampler = build_online_tile_loaders(
-        split_records,
-        transform,
+    loader_builder = build_online_tile_loaders
+    loader_args: tuple[Any, ...] = (split_records, transform)
+    if args.target_cache_index:
+        cache_paths = read_tile_cache_index(args.target_cache_index)
+        first_cache = next(iter(cache_paths.values()))
+        cache_info = validate_cache(first_cache, expected_kind="tile_eaf")
+        cache_spec = cache_info["spec"]
+        cache_encoder = str(cache_spec.get("tile_encoder", ""))
+        compatible_names = {cache_encoder}
+        if cache_encoder == "conch_v15":
+            compatible_names.add("titan")
+        if args.model_name not in compatible_names:
+            raise ValueError(
+                f"Cache encoder={cache_encoder!r} is incompatible with "
+                f"--model-name={args.model_name!r}"
+            )
+        if int(cache_spec.get("early_layer", args.source_layer)) != args.source_layer:
+            raise ValueError(
+                f"Cache documents early_layer={cache_spec.get('early_layer')}, "
+                f"but training requested --source-layer={args.source_layer}"
+            )
+        attention_shape = cache_info["datasets"]["final_attention"]
+        if len(attention_shape) != 2 or int(attention_shape[1]) != adapter.n_patches:
+            raise ValueError(
+                f"Cache attention geometry {attention_shape} does not match "
+                f"encoder n_patches={adapter.n_patches}"
+            )
+        loader_builder = build_compact_cache_tile_loaders
+        loader_args = (split_records, cache_paths, transform)
+    train_loader, val_loader, train_sampler, val_sampler = loader_builder(
+        *loader_args,
         batch_size=args.batch_size,
         slides_per_batch=args.slides_per_batch,
         train_slides_per_epoch=resolved_train_wsis,
@@ -339,7 +390,12 @@ def main() -> None:
                 "resolved_train_wsis_per_epoch": resolved_train_wsis,
                 "resolved_train_tiles_per_epoch": resolved_train_wsis * args.tiles_per_wsi,
             },
-            tags=[args.model_name, "tile_eaf", "online", "task_agnostic"],
+            tags=[
+                args.model_name,
+                "tile_eaf",
+                "compact_cache" if args.target_cache_index else "online",
+                "task_agnostic",
+            ],
         )
 
     best_val = math.inf
@@ -366,6 +422,7 @@ def main() -> None:
             log_every=args.log_every,
             global_step=global_step,
             use_wandb=use_wandb,
+            cached_targets=bool(args.target_cache_index),
         )
         val_metrics, global_step = _run_epoch(
             forecaster=forecaster,
@@ -382,6 +439,7 @@ def main() -> None:
             log_every=args.log_every,
             global_step=global_step,
             use_wandb=use_wandb,
+            cached_targets=bool(args.target_cache_index),
         )
         scheduler.step()
         row = {
@@ -437,7 +495,11 @@ def main() -> None:
         "checkpoint": str(checkpoint_path),
         "epochs_completed": len(history),
         "history": history,
-        "storage_policy": "best checkpoint + JSON only; no tile/embedding/attention cache",
+        "storage_policy": (
+            "best checkpoint + JSON; cached final attention + online early exit"
+            if args.target_cache_index
+            else "best checkpoint + JSON only; no tile/embedding/attention cache"
+        ),
     }
     (output_dir / f"summary_{run_name}.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"

@@ -9,43 +9,125 @@ variants trained from the same cache see identical teacher targets.
 
 ## Tile EAF
 
-For a configured tile encoder and `early_layer` (default 2), cache creation stores four
-arrays per slide:
+**Compact permanent cache (CACHE_SCHEMA_VERSION v2, 2026-08-07).** Cache creation stores
+three arrays per slide, one HDF5 file per WSI:
 
 ```text
-coords            int32   [N, 2]
-early_tokens      float16 [N, T, D]
-final_attention   float16 [N, ...]
-tile_embeddings   float16 [N, Dout]
+coords            int32   [N, 2]           # level-0 (x, y) of each tile's top-left corner
+final_attention   float16 [N, T]           # CLS-to-patch, head-averaged, L1-renormalized
+tile_embeddings   float16 [N, Dout]        # Dout=768 for CONCH v1.5 (pooled, not per-token)
 ```
 
-`final_attention` is the canonical target already consumed by the Tile-EAF objective. A
-model adapter is responsible for defining its reduction (for example CLS-to-patch,
-averaged across heads). The policy is recorded in `TileCacheSpec.attention_reduction`.
+`early_tokens` `float16 [N, T, D]` (T=784, D=1024 for CONCH v1.5) is **deliberately not
+persisted**. It was measured at >99.8% of on-disk bytes (~1.53 MiB/tile vs. ~3.27
+KiB/tile for everything else combined — a real 2-slide HISTAI-hematologic smoke test
+cache dropped from 265/352 MiB to 550/729 KiB per slide once removed), which at
+full-corpus scale is a many-TB-to-low-PB difference for a component EAF Tile training
+can instead recompute for a few hundred milliseconds per batch. Storing it was the v1
+design (see below); **EAF Tile training now recomputes it ONLINE** via
+`HookedViTTileTeacherAdapter.extract_early(images, early_layer)` — a cheap early-exit
+partial forward through blocks `0..early_layer` only (measured ~8.7x faster than
+`extract_final`'s full 24-block forward on CPU; a bigger margin is expected on GPU),
+raised as an exception from inside the target block's own `forward_hook` so no later
+block, the final norm, or the pooling head ever executes. See
+`src/wsi_pipeline/compact_cache_dataset.py`'s `CompactTileTargetDataset`, which pairs
+the cached `final_attention` (target) with tile pixels re-read from the source WSI
+(image), and lets the training loop call `extract_early` on the collated batch.
+
+**Consequence for the cold-archive/raw-release policy** (see "Cold archive" below): EAF
+Tile training is *not* pixel-free anymore. It needs raw WSI (or, in the future, the cold
+archive) access at every training step for `extract_early`, even though it never runs
+the full frozen teacher. Releasing raw for a corpus EAF Tile is actively training
+against — without first pointing training at an alternative pixel source — would break
+it; this is a real, load-bearing dependency introduced by moving `early_tokens` out of
+the permanent cache, not a slip to overlook.
+
+`HookedViTTileTeacherAdapter.extract_final(images)` is the offline, cache-building
+counterpart: one full forward, only `final_attention` + `tile_embeddings`, no
+`early_tokens` hook installed at all (so building the cache doesn't even pay the small
+extra cost of capturing/transferring an array it will discard). The combined
+`extract(images, early_layer)` (both quantities from one full forward) still exists
+purely for numeric-equivalence testing and ad-hoc inspection — no production code path
+uses it.
+
+**`early_layer` semantics (pinned, not ambiguous):** 0-based transformer block index;
+the value is that block's **output** — after both its attention and MLP residual
+branches, i.e. the hidden state as handed to `block[early_layer + 1]` — with the
+CLS/register prefix stripped. This is captured via a plain `register_forward_hook` on
+the block itself. It is deliberately **not** the block's attention-submodule *input*
+(`norm1(block_input)`, which is effectively the *previous* block's output after
+normalization) — an earlier version of this adapter captured that instead for the same
+`early_layer` value, silently disagreeing with the online teacher below. Every cache's
+`TileCacheSpec.early_layer_semantics` field carries this exact prose so a reader never
+has to guess what a given cache's `early_layer=2` means.
+
+**`final_attention` semantics (pinned):** CLS-to-patch self-attention (post-softmax) at
+the model's **last** transformer block, averaged over heads, then L1-renormalized over
+the patch axis so each row sums to 1.0 (`TileCacheSpec.attention_reduction ==
+"cls_mean_heads_l1norm"`). Renormalization matters: softmax attention including the
+CLS/register prefix does not sum to 1 once those prefix columns are dropped from
+storage, so skipping it leaves a teacher distribution the online trainer was never
+actually fit against.
+
+Both of the above are pinned to match `src.models.online_tile_eaf.OnlineAttentionTeacher`
+— the teacher actually driving the live online Tile-EAF trainer
+(`scripts/train_wsi_tile_eaf_online.py`) — bit for bit, verified numerically (fp16
+tolerance) against the real, gated CONCH v1.5 checkpoint (`MahmoodLab/TITAN`'s
+`return_conch()`), not merely "a" reasonable definition. See
+`src/wsi_pipeline/model_adapters.py::HookedViTTileTeacherAdapter` for the implementation
+and its extended docstring for the full derivation.
 
 The tile adapter implements `TileTeacherAdapter.extract(images, early_layer)` and returns
-`TileTeacherOutput`. Existing CONCH/timm extraction code should be migrated behind that
-adapter rather than duplicated in a new script.
-
-Concrete implementation: `HookedViTTileTeacherAdapter` in `src/wsi_pipeline/model_adapters.py`
-generalizes the hook recipe already used by
-`src/collection/extract_features.py::collect_and_save_dataset` (timm-style `Attention`:
-`qkv` → optional `q_norm`/`k_norm` → softmax → `proj`) into a reusable adapter. Block
+`TileTeacherOutput`; `HookedViTTileTeacherAdapter` is the concrete implementation, and
+`python scripts/eaf.py cache tile` is the canonical, sole CLI entry point that drives it
+end to end (dataset adapter → TRIDENT coords → `HookedViTTileTeacherAdapter` → atomic
+per-slide HDF5 via `TileCacheWriter`). The older `scripts/wsi_extract_tile_embeddings.py`
++ `ConchV15MultiLayerEncoder`/`TimmViTMultiLayerEncoder` (which extracted layer-2 + final
+embeddings only, with no attention target) has been removed — it also never actually ran
+against the real CONCH v1.5 checkpoint (its `conch.encode_image(...)` call does not exist
+on that model; the real API is `conch(images)`) and used the wrong input resolution (512
+instead of CONCH v1.5's actual 448, from `titan.return_conch()`'s own transform). Block
 discovery reuses `src.wsi_pipeline.tile_encoders.hooks.find_transformer_blocks`, so both
-plain timm ViTs (`HookedViTTileTeacherAdapter.from_timm("hf-hub:...")`, e.g. UNI) and
-CONCH v1.5's `visual.trunk` (`HookedViTTileTeacherAdapter.from_conch()`) are supported —
-`from_timm` is validated in `tests/wsi_pipeline/test_model_adapters.py` against a real
-`vit_tiny_patch16_224`; `from_conch` follows the same interface as the existing
-`ConchV15MultiLayerEncoder` (`src/wsi_pipeline/tile_encoders/conch_v15.py`) but has not
-been run against the real gated checkpoint in this environment — it raises immediately if
-CONCH's attention module doesn't match the expected timm interface, rather than silently
-capturing the wrong tensor.
+plain timm ViTs (`HookedViTTileTeacherAdapter.from_timm(...)`, e.g. UNI) and CONCH v1.5
+(`HookedViTTileTeacherAdapter.from_conch()`, resolving `conch.trunk.blocks`, 24 blocks,
+`num_prefix_tokens=1`) are supported as long as the attention module exposes the standard
+`qkv`/`scale`/`attn_drop`/`proj`/`proj_drop` interface (optionally `q_norm`/`k_norm`).
+Prefix-token count is auto-resolved (`resolve_num_prefix_tokens`), not hardcoded to 1.
 
-Note this is a different extraction than `ConchV15MultiLayerEncoder`/`TimmViTMultiLayerEncoder`
-(`src/wsi_pipeline/tile_encoders/`): those pool only the CLS token at an early block and
-feed the *WSI*-EAF tile-embedding stage (`WSITeacherAdapter.extract`'s `tile_embeddings`
-input); `HookedViTTileTeacherAdapter` captures the full early-block patch-token sequence
-plus final CLS→patch attention needed by Tile-EAF itself.
+`tile_embeddings` is the encoder's own final pooled output exactly as the model produces
+it (`conch(images)` for CONCH v1.5 — its 768-d attentional-pooler + LayerNorm output, not
+a raw CLS token) and is shared, unmodified, with the WSI-EAF cache stage below — it is
+never treated as Tile-EAF-exclusive.
+
+### Resume, integrity and atomicity
+
+`TileCacheWriter` writes to a sibling `.tmp` file; the real path only appears via an
+atomic `os.replace` when the writer closes *without* an exception, and only after the
+HDF5 `complete` attribute is set `True`. A crash, OOM, or Ctrl-C mid-slide therefore never
+leaves a corrupt/partial file at the real cache path. `tile_cache_status(path,
+coords_path=..., spec=...)` (in `src/wsi_pipeline/cache_io.py`) is the resume check every
+caller (the CLI, the HISTAI orchestrator) uses before (re)building a slide: it rebuilds
+from scratch — never silently trusts — whenever the cache is missing, not `complete`,
+corrupt/unreadable, was built under a different `TileCacheSpec.cache_id` (encoder/layer/
+attention/dtype changed), or its tile count disagrees with the TRIDENT coords file's row
+count. `validate_cache`/`n_coords_in_registry` retry briefly on a known transient HDF5
+"unable to lock file" race (observed right after a DataLoader with worker processes tears
+down) rather than treating a momentary lock contention as corruption.
+
+### Storage cost (measured, not estimated)
+
+**Compact cache (current, v2):** per tile, CONCH v1.5, fp16, lzf: `final_attention` 1.53
+KiB, `tile_embeddings` 1.5 KiB, `coords` 8 B — **~3.27 KiB/tile total.** A 172-tile and a
+229-tile HISTAI-hematologic smoke-test slide measured 3,271 and 3,261 bytes/tile on disk.
+Projected: **~3.3 GB per 1M tiles, ~33 GB per 10M tiles** — full HISTAI+GTEx+HEST at
+tile-level is now a routine amount of storage, not a capacity-planning decision.
+
+**v1 (superseded), for context on why the array was dropped:** with `early_tokens`
+[N,784,1024] included, per-tile cost was ~1.53 MiB (99.8% of it `early_tokens`; lzf
+achieves ~0% reduction on dense float activations), projecting to ~1.53 TB/1M tiles and
+~15.3 TB/10M tiles — a real many-TB-to-low-PB commitment at full-corpus scale that this
+redesign (online `extract_early` recomputation instead of caching, ~470-500x smaller on
+disk) removes.
 
 ## WSI EAF
 
@@ -82,11 +164,65 @@ existing `src/wsi_pipeline/wsi_models/` adapter rather than reimplementing it:
 
 ## Cache identity
 
-Cache identity includes model names/revisions, early layer, magnification, patch size,
-dtype and attention policy. Two caches with different teacher semantics must never share a
-cache directory. `TileCacheSpec.cache_id` and `WSICacheSpec.cache_id` provide stable IDs.
+Cache identity includes model name/revision, magnification, patch size, dtype and
+attention policy. Two caches with different teacher semantics must never share a cache
+directory. `TileCacheSpec.cache_id` and `WSICacheSpec.cache_id` provide stable IDs.
+`TileCacheSpec.early_layer` is the one field deliberately **excluded** from
+`cache_id`: since v2 it no longer determines any stored byte (see "Tile EAF" above) — it
+is purely a training-time parameter for `extract_early`, recorded in every cache's
+metadata as documentation, but changing it must never force an unrelated, expensive
+full-forward rebuild of `final_attention`/`tile_embeddings`.
 
 ## Large-corpus workflow
+
+### Profile and tune tile-cache extraction
+
+Use real WSI reads for tuning; the synthetic ``--batch-size auto`` probe only checks
+VRAM fit. The tuner publishes no cache during its benchmark and records phase timings
+for the subsequent run:
+
+```bash
+python scripts/eaf.py cache tile \
+  --data-root "$EAF_WSI_ROOT" \
+  --manifest "$SOURCE_DATASET/manifests/slides.csv" \
+  --output-dir "$EAF_WSI_ROOT/caches/tile_eaf/<dataset>/conch_v15/<cache-id>" \
+  --encoder conch_v15 --dataset <dataset> \
+  --autotune --batch-size-candidates 32 64 96 \
+  --worker-candidates 4 8 16 --prefetch-candidates 2 4 \
+  --profile-json "$EAF_WSI_ROOT/logs/tile_cache_profile.json" \
+  --compression none
+```
+
+Do not run TRIDENT segmentation concurrently on the same GPU while tuning. Existing
+valid per-slide files are skipped unless ``--overwrite`` is supplied.
+
+### Train Tile-EAF from the compact cache
+
+First create one validated index over the source cache roots. This verifies cache
+identity, completeness, tile counts, and exact coordinate order without copying HDF5
+files:
+
+```bash
+python scripts/eaf.py cache index-tile \
+  --data-root "$EAF_WSI_ROOT" \
+  --slides "$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1/manifests/slides.csv" \
+  --cache-root "$EAF_WSI_ROOT/caches/tile_eaf/histai_eaf_wsi_v1" \
+  --cache-root "$EAF_WSI_ROOT/caches/tile_eaf/hest_eaf_wsi_v1" \
+  --cache-root "$EAF_WSI_ROOT/caches/tile_eaf/gtex_eaf_wsi_v1" \
+  --output "$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1/manifests/tile_cache_index.csv"
+
+python scripts/train_wsi_tile_eaf_online.py \
+  --model-name titan \
+  --manifest "$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1/manifests/slides.csv" \
+  --data-root "$EAF_WSI_ROOT" \
+  --target-cache-index "$EAF_WSI_ROOT/datasets/pretraining/eaf_wsi_pretrain_strict_v1/manifests/tile_cache_index.csv" \
+  --source-layer 2 --batch-size 32 --num-workers 8
+```
+
+Cached-attention training deliberately disables random spatial augmentation: flipping,
+rotating, or jittering pixels without applying the identical permutation to the patch
+attention grid would corrupt the target. The loader runs only through the requested
+early block and never executes the cached teacher's final blocks.
 
 ```text
 HISTAI / GTEx raw WSI
@@ -103,7 +239,10 @@ Tile teacher cache        cold tissue-pixel archive
 WSI teacher cache
         |
         v
-Tile-EAF / WSI-EAF training (teacher-free, cache-only)
+WSI-EAF training (teacher-free, cache-only)
+Tile-EAF training  (teacher-free, but NOT pixel-free: reads final_attention from
+                     the cache + tile pixels from raw WSI/archive, recomputes
+                     early_tokens online via a cheap partial forward each step)
 ```
 
 For GTEx, one WSI is one DICOM `SeriesInstanceUID`. Store a representative `.dcm` in the

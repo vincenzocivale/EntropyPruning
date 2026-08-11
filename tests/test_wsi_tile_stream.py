@@ -89,6 +89,33 @@ def test_manifest_paths_and_case_disjoint_split(tmp_path: Path) -> None:
     assert patch_size == 512
 
 
+def test_manifest_maps_strict_holdout_to_test(tmp_path: Path) -> None:
+    rows = []
+    for split in ("train", "val", "holdout"):
+        slide_id = f"slide_{split}"
+        raw = tmp_path / f"{slide_id}.svs"
+        raw.touch()
+        coords = tmp_path / f"{slide_id}.h5"
+        _write_coords(coords)
+        rows.append(
+            {
+                "slide_id": slide_id,
+                "case_id": slide_id,
+                "cohort": "A",
+                "raw_path": str(raw),
+                "coords_path": str(coords),
+                "split": split,
+            }
+        )
+    manifest = tmp_path / "slides.csv"
+    with manifest.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    splits = load_wsi_manifest(manifest, tmp_path)
+    assert [row.slide_id for row in splits["test"]] == ["slide_holdout"]
+
+
 
 def test_trident_level0_patch_size_takes_precedence(tmp_path: Path) -> None:
     path = tmp_path / "slide_patches.h5"

@@ -1,5 +1,17 @@
 # WSI preprocessing, multi-layer tile embeddings and attention audit
 
+> **Superseded (2026-08-07) for cache production.** `scripts/wsi_extract_tile_embeddings.py`
+> and the `eaf.wsi.tile_features.v2` layer2/final-only schema described in this doc have
+> been removed/replaced by `python scripts/eaf.py cache tile` (see
+> `docs/offline_eaf_pipeline.md` and `src/wsi_pipeline/tile_cache_pipeline.py`), which adds
+> the final CLS-to-patch attention target in the same forward pass and fixes two bugs this
+> older pipeline had: `ConchV15MultiLayerEncoder` never actually ran against the real
+> CONCH v1.5 checkpoint (`conch.encode_image(...)` does not exist on it -- the real API is
+> `conch(images)`) and used the wrong input size (512 instead of CONCH v1.5's actual 448).
+> The TRIDENT segmentation/coordinate steps below (section 1) are still accurate and
+> reused as-is. Sections 4-5 (WSI-level attention audit, majority analysis) are unrelated
+> to tile-cache production and still apply.
+
 This pipeline is label-free until downstream evaluation is explicitly added. It is designed to:
 
 1. run resumable TRIDENT tissue segmentation and coordinate extraction;

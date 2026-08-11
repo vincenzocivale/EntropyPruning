@@ -235,6 +235,8 @@ def load_wsi_manifest(
         explicit = (row.get(split_column) or "").strip().lower()
         if explicit in {"validation", "valid"}:
             explicit = "val"
+        if explicit == "holdout":
+            explicit = "test"
         if explicit not in {"train", "val", "test"}:
             explicit = (
                 "val"

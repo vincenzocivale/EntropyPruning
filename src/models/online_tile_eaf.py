@@ -179,6 +179,39 @@ class OnlineAttentionTeacher:
             )
         return source, target
 
+    @torch.no_grad()
+    def extract_early(self, images: torch.Tensor) -> torch.Tensor:
+        """Return source-layer patch tokens and abort before later blocks execute."""
+        cache: dict[str, torch.Tensor] = {}
+        prefix = self.adapter.num_prefix_tokens
+        source_block = self.adapter.get_blocks()[self.source_layer]
+
+        class _EarlyExit(Exception):
+            pass
+
+        def source_hook(_: nn.Module, __: tuple[Any, ...], output: Any) -> None:
+            if not torch.is_tensor(output):
+                raise TypeError(
+                    f"Source block returned unsupported type {type(output)!r}"
+                )
+            cache["source"] = output[:, prefix:].detach()
+            raise _EarlyExit()
+
+        handle = source_block.register_forward_hook(source_hook)
+        try:
+            try:
+                if hasattr(self.backbone, "forward_features"):
+                    self.backbone.forward_features(images)
+                else:
+                    self.backbone(images)
+            except _EarlyExit:
+                pass
+        finally:
+            handle.remove()
+        if "source" not in cache:
+            raise RuntimeError("Early-exit teacher hook did not observe source layer")
+        return cache["source"]
+
 
 class PrunedLoRAEncoder(nn.Module):
     """LoRA tile encoder with vectorized forecaster-guided token pruning.

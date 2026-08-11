@@ -74,7 +74,7 @@ $EAF_WSI_ROOT/
 │       └── wsi_level/<benchmark>/
 │           └── eaf_thunder_nsclc_ood_clean_v1/  # CPTAC/NSCLC-OOD eval inventory (IDC)
 ├── caches/                               # NEW: frozen teacher outputs for offline EAF training
-│   ├── tile_eaf/<dataset>/<tile_encoder>/<cache_id>/
+│   ├── tile_eaf/<dataset>/<tile_encoder>/<cache_id>/[<subset>/]<slide_id>.h5
 │   └── wsi_eaf/<dataset>/<tile_encoder>__<wsi_encoder>/<cache_id>/
 ├── archives/                             # NEW: cold tissue-pixel archives after segmentation
 │   ├── histai/

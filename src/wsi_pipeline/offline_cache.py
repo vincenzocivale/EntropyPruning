@@ -29,10 +29,12 @@ def cache_tile_slide(
     output_path = Path(output_path)
     with TileCacheWriter(output_path, spec, slide_id=slide_id, case_id=case_id) as writer:
         for images, coords in batches:
-            output = adapter.extract(images, early_layer=spec.early_layer)
+            # extract_final (not the combined extract()): early_tokens is not part of
+            # the permanent cache (CACHE_SCHEMA_VERSION v2) -- EAF Tile training
+            # recomputes it online via HookedViTTileTeacherAdapter.extract_early.
+            output = adapter.extract_final(images)
             writer.append(
                 coords=coords,
-                early_tokens=output.early_tokens,
                 final_attention=output.final_attention,
                 tile_embeddings=output.tile_embeddings,
             )

@@ -58,6 +58,14 @@ Likewise, migrate unique behavior from `wsi_extract_tile_embeddings.py` and
 `wsi_extract_fm_outputs.py` into implementations of `TileTeacherAdapter` and
 `WSITeacherAdapter`, writing the cache contracts in `src/wsi_pipeline/cache_io.py`.
 
+**Tile side done (2026-08-07):** `wsi_extract_tile_embeddings.py` and its underlying
+`ConchV15MultiLayerEncoder`/`TimmViTMultiLayerEncoder`/`tile_extraction.py` (no attention
+support, and never actually validated against the real gated CONCH v1.5 checkpoint) have
+been removed. `HookedViTTileTeacherAdapter` (`TileTeacherAdapter`) + `python scripts/eaf.py
+cache tile` is now the sole tile-cache entry point, numerically validated end to end
+against real HISTAI slides — see `docs/offline_eaf_pipeline.md`. `wsi_extract_fm_outputs.py`
+(WSI-level FM outputs, a separate concern) was not touched by this pass.
+
 ## Legacy cleanup candidates
 
 After references/tests have been audited, remove manual/debug-only entry points whose

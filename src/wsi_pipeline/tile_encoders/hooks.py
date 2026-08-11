@@ -36,6 +36,26 @@ def find_transformer_blocks(model: nn.Module) -> Sequence[nn.Module]:
     return discovered[0][1]
 
 
+def resolve_num_prefix_tokens(model: nn.Module, blocks: Sequence[nn.Module]) -> int:
+    """Find how many prefix tokens (CLS + optional register tokens) precede patches.
+
+    Tries, in order: (1) ``model.num_prefix_tokens`` directly; (2) the same module
+    whose ``.blocks`` attribute *is* ``blocks`` (the actual trunk owning them, since
+    ``model`` itself may be a thin wrapper, e.g. CONCH's ``EncoderWithAttentionalPooler``
+    around ``model.trunk``); (3) a conservative fallback of ``1`` (CLS-only), which is
+    correct for every model this pipeline currently targets (CONCH v1.5, UNI-family).
+    """
+    direct = getattr(model, "num_prefix_tokens", None)
+    if isinstance(direct, int):
+        return direct
+    for _, module in model.named_modules():
+        if getattr(module, "blocks", None) is blocks:
+            owned = getattr(module, "num_prefix_tokens", None)
+            if isinstance(owned, int):
+                return owned
+    return 1
+
+
 def extract_cls_token(value: Any, batch_size: int) -> torch.Tensor:
     if isinstance(value, (tuple, list)):
         value = value[0]
