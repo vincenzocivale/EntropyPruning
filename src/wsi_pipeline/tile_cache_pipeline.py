@@ -41,7 +41,11 @@ from tqdm.auto import tqdm
 from .cache_contracts import TileCacheSpec
 from .cache_io import TileCacheWriter, tile_cache_status
 from .model_adapters import HookedViTTileTeacherAdapter
-from .patch_dataset import OpenSlideCoordinateDataset
+from .patch_dataset import (
+    MultiSlideCoordinateDataset,
+    OpenSlideCoordinateDataset,
+    SlideSequentialBatchSampler,
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,9 @@ class TileCacheRunConfig:
     compression: str | None = "lzf"
     overwrite: bool = False
     profile: bool = False
+    slide_loader_chunk_size: int = 32
+    persistent_workers: bool = True
+    openslide_cache_bytes: int = 0
 
 
 def cache_path_for(output_dir: Path, slide_id: str) -> Path:
@@ -143,6 +150,7 @@ def autotune_loader(
     worker_candidates: tuple[int, ...] = (4, 8, 16),
     prefetch_candidates: tuple[int, ...] = (2, 4),
     benchmark_batches: int = 4,
+    openslide_cache_bytes: int = 0,
 ) -> tuple[int, int, int, list[dict[str, Any]]]:
     """Tune on real WSI reads after selecting the largest batch that fits.
 
@@ -154,7 +162,8 @@ def autotune_loader(
         adapter, device=device, candidates=batch_size_candidates
     )
     dataset = OpenSlideCoordinateDataset(
-        item.wsi_path, item.coords_path, adapter.transform, output_size=adapter.input_size
+        item.wsi_path, item.coords_path, adapter.transform, output_size=adapter.input_size,
+        openslide_cache_bytes=openslide_cache_bytes,
     )
     results: list[dict[str, Any]] = []
     for workers in worker_candidates:
@@ -325,6 +334,204 @@ def cache_one_slide(
     return row
 
 
+def _cache_slide_chunk(
+    items: list[TileCacheItem],
+    *,
+    adapter: HookedViTTileTeacherAdapter,
+    spec: TileCacheSpec,
+    config: TileCacheRunConfig,
+) -> list[dict[str, Any]]:
+    """Cache a slide chunk with one persistent DataLoader worker pool.
+
+    Batches never cross a WSI boundary. The next slide can nevertheless be prefetched
+    while the GPU handles the current slide. If the shared loader fails, completed
+    atomic caches are retained and every unfinished slide is retried through the
+    isolated per-slide path so one corrupt WSI cannot poison the whole chunk.
+    """
+    device = torch.device(config.device)
+    dataset = MultiSlideCoordinateDataset(
+        [item.wsi_path for item in items],
+        [item.coords_path for item in items],
+        adapter.transform,
+        output_size=adapter.input_size,
+        openslide_cache_bytes=config.openslide_cache_bytes,
+    )
+    batch_sampler = SlideSequentialBatchSampler(dataset.lengths, config.batch_size)
+    loader_kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_sampler": batch_sampler,
+        "num_workers": config.num_workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": config.persistent_workers and config.num_workers > 0,
+    }
+    if config.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = config.prefetch_factor
+    loader = DataLoader(**loader_kwargs)
+
+    rows: list[dict[str, Any]] = []
+    completed_ids: set[str] = set()
+    current_index: int | None = None
+    writer: TileCacheWriter | None = None
+    progress = None
+    started = 0.0
+    wait_seconds = 0.0
+    transfer_compute_seconds = 0.0
+    write_seconds = 0.0
+
+    def open_slide(slide_index: int, initial_wait: float) -> None:
+        nonlocal current_index, writer, progress, started
+        nonlocal wait_seconds, transfer_compute_seconds, write_seconds
+        item = items[slide_index]
+        current_index = slide_index
+        started = time.perf_counter() - initial_wait
+        wait_seconds = initial_wait
+        transfer_compute_seconds = 0.0
+        write_seconds = 0.0
+        writer = TileCacheWriter(
+            cache_path_for(config.output_dir, item.slide_id),
+            spec,
+            slide_id=item.slide_id,
+            case_id=item.case_id,
+            compression=config.compression,
+            expected_n=dataset.lengths[slide_index],
+        )
+        progress = tqdm(
+            total=dataset.lengths[slide_index],
+            desc=item.slide_id,
+            unit="tile",
+            leave=False,
+        )
+
+    def close_slide(*, complete: bool) -> None:
+        nonlocal current_index, writer, progress
+        if writer is None or current_index is None:
+            return
+        item = items[current_index]
+        count = writer.count
+        try:
+            writer.close(mark_complete=complete)
+        finally:
+            if progress is not None:
+                progress.close()
+        if complete:
+            output_path = cache_path_for(config.output_dir, item.slide_id)
+            status = tile_cache_status(output_path, coords_path=item.coords_path, spec=spec)
+            if not status["ok"]:
+                raise RuntimeError(
+                    f"{item.slide_id}: cache failed post-write integrity check: "
+                    f"{status['reason']}"
+                )
+            elapsed = time.perf_counter() - started
+            row: dict[str, Any] = {
+                "slide_id": item.slide_id,
+                "status": "built",
+                "path": str(output_path),
+                "n_tiles": count,
+                **status,
+            }
+            if config.profile:
+                row.update(
+                    elapsed_seconds=elapsed,
+                    tiles_per_second=count / max(elapsed, 1e-9),
+                    data_wait_seconds=wait_seconds,
+                    transfer_compute_seconds=transfer_compute_seconds,
+                    write_seconds=write_seconds,
+                )
+                if device.type == "cuda":
+                    row["peak_cuda_memory_gib"] = (
+                        torch.cuda.max_memory_allocated(device) / 2**30
+                    )
+            rows.append(row)
+            completed_ids.add(item.slide_id)
+        current_index = None
+        writer = None
+        progress = None
+
+    shared_error: Exception | None = None
+    if config.profile and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    iterator = None
+    try:
+        iterator = iter(loader)
+        while True:
+            waited_at = time.perf_counter()
+            try:
+                images, coords, slide_indices, local_indices = next(iterator)
+            except StopIteration:
+                break
+            batch_wait = time.perf_counter() - waited_at
+            unique_slides = torch.unique(slide_indices)
+            if unique_slides.numel() != 1:
+                raise RuntimeError("A persistent-loader batch crossed a WSI boundary")
+            slide_index = int(unique_slides.item())
+            if current_index != slide_index:
+                close_slide(complete=True)
+                open_slide(slide_index, batch_wait)
+            else:
+                wait_seconds += batch_wait
+            assert writer is not None
+            expected_local = torch.arange(
+                writer.count,
+                writer.count + len(local_indices),
+                dtype=local_indices.dtype,
+            )
+            if not torch.equal(local_indices.cpu(), expected_local):
+                raise RuntimeError(
+                    f"Non-contiguous tile order for {items[slide_index].slide_id}"
+                )
+            compute_at = time.perf_counter()
+            images = images.to(device, non_blocking=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=device.type == "cuda",
+            ):
+                output = adapter.extract_final(images)
+            transfer_compute_seconds += time.perf_counter() - compute_at
+            write_at = time.perf_counter()
+            writer.append(
+                coords=coords.numpy(),
+                final_attention=output.final_attention.numpy(),
+                tile_embeddings=output.tile_embeddings.numpy(),
+            )
+            write_seconds += time.perf_counter() - write_at
+            if progress is not None:
+                progress.update(int(images.shape[0]))
+        close_slide(complete=True)
+    except Exception as exc:  # noqa: BLE001 - isolate failures below
+        shared_error = exc
+        try:
+            close_slide(complete=False)
+        except Exception:
+            pass
+    finally:
+        if iterator is not None:
+            shutdown = getattr(iterator, "_shutdown_workers", None)
+            if shutdown is not None:
+                shutdown()
+            del iterator
+        del loader
+
+    if shared_error is not None:
+        for item in items:
+            if item.slide_id in completed_ids:
+                continue
+            try:
+                rows.append(
+                    cache_one_slide(item, adapter=adapter, spec=spec, config=config)
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve per-slide progress
+                rows.append(
+                    {
+                        "slide_id": item.slide_id,
+                        "status": "error",
+                        "error": repr(exc),
+                        "shared_loader_error": repr(shared_error),
+                    }
+                )
+    return rows
+
+
 def cache_many_slides(
     items: Iterable[TileCacheItem],
     *,
@@ -334,10 +541,70 @@ def cache_many_slides(
 ) -> list[dict[str, Any]]:
     """Cache every slide in ``items``; one failure never aborts the rest of the run."""
     item_list = list(items)
-    rows: list[dict[str, Any]] = []
-    for item in tqdm(item_list, desc="tile-cache slides", unit="slide"):
+    if config.slide_loader_chunk_size <= 0:
+        raise ValueError("slide_loader_chunk_size must be positive")
+
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    pending: list[TileCacheItem] = []
+    for item in tqdm(item_list, desc="validate tile caches", unit="slide"):
+        output_path = cache_path_for(config.output_dir, item.slide_id)
+        if not config.overwrite:
+            status = tile_cache_status(
+                output_path, coords_path=item.coords_path, spec=spec
+            )
+            if status["ok"]:
+                rows_by_id[item.slide_id] = {
+                    "slide_id": item.slide_id,
+                    "status": "skipped_valid",
+                    "path": str(output_path),
+                    **status,
+                }
+                continue
+        pending.append(item)
+
+    for start in tqdm(
+        range(0, len(pending), config.slide_loader_chunk_size),
+        desc="tile-cache chunks",
+        unit="chunk",
+    ):
+        chunk = pending[start : start + config.slide_loader_chunk_size]
         try:
-            rows.append(cache_one_slide(item, adapter=adapter, spec=spec, config=config))
-        except Exception as exc:  # noqa: BLE001 - record and continue, never silently drop a slide
-            rows.append({"slide_id": item.slide_id, "status": "error", "error": repr(exc)})
-    return rows
+            if config.persistent_workers and len(chunk) > 1:
+                chunk_rows = _cache_slide_chunk(
+                    chunk, adapter=adapter, spec=spec, config=config
+                )
+            else:
+                chunk_rows = []
+                for item in chunk:
+                    try:
+                        chunk_rows.append(
+                            cache_one_slide(
+                                item, adapter=adapter, spec=spec, config=config
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        chunk_rows.append(
+                            {
+                                "slide_id": item.slide_id,
+                                "status": "error",
+                                "error": repr(exc),
+                            }
+                        )
+        except Exception as exc:  # dataset construction may fail before fallback
+            chunk_rows = []
+            for item in chunk:
+                try:
+                    chunk_rows.append(
+                        cache_one_slide(item, adapter=adapter, spec=spec, config=config)
+                    )
+                except Exception as item_exc:  # noqa: BLE001
+                    chunk_rows.append(
+                        {
+                            "slide_id": item.slide_id,
+                            "status": "error",
+                            "error": repr(item_exc),
+                            "shared_loader_error": repr(exc),
+                        }
+                    )
+        rows_by_id.update((row["slide_id"], row) for row in chunk_rows)
+    return [rows_by_id[item.slide_id] for item in item_list]

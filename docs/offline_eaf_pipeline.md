@@ -189,12 +189,44 @@ python scripts/eaf.py cache tile \
   --encoder conch_v15 --dataset <dataset> \
   --autotune --batch-size-candidates 32 64 96 \
   --worker-candidates 4 8 16 --prefetch-candidates 2 4 \
+  --openslide-cache-mib 512 \
+  --slide-loader-chunk-size 32 --persistent-workers \
   --profile-json "$EAF_WSI_ROOT/logs/tile_cache_profile.json" \
   --compression none
 ```
 
 Do not run TRIDENT segmentation concurrently on the same GPU while tuning. Existing
 valid per-slide files are skipped unless ``--overwrite`` is supplied.
+
+Cache production uses one DataLoader worker pool for each group of 32 missing WSIs.
+Batches remain slide-pure and HDF5 files are still finalized atomically one WSI at a
+time, while workers can prefetch the next slide before the current one finishes. A
+shared-loader failure falls back to the isolated per-slide path for every unfinished
+WSI. Set ``--slide-loader-chunk-size 1`` or ``--no-persistent-workers`` to restore the
+legacy loader lifecycle for diagnosis.
+
+``--openslide-cache-mib`` installs a decoded-tile cache on each worker's independent
+OpenSlide handle. This matters for WSI whose internal TIFF tiles are much larger than
+the requested model patch: a 512-pixel patch read from a 4096-pixel JPEG tile can
+otherwise trigger repeated decompression. Capacity is per worker, so account for the
+aggregate host-memory budget (for example, 4 workers x 512 MiB = 2 GiB).
+
+On HISTAI generic pyramidal TIFFs (JPEG-compressed 4096 px internal tiles, 512 px model
+patches), an isolated A100 benchmark over the same 4,861 patches measured:
+
+| batch | workers | cache/worker | tiles/s | data wait | peak CUDA |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 4 | 512 MiB | 137.8 | 9.7 s | 3.38 GiB |
+| **128** | **4** | **512 MiB** | **159.6** | **5.4 s** | **5.06 GiB** |
+| 256 | 4 | 512 MiB | 139.9 | 8.3 s | 8.42 GiB |
+| 512 | 8 | 256 MiB | 72.0 | 24.0 s | 15.12 GiB |
+| 1024 | 8 | 256 MiB | 51.0 | 40.3 s | 28.54 GiB |
+
+The largest fitting batch is not the fastest. A DataLoader worker constructs one whole
+batch serially; very large batches therefore increase refill latency even when more
+workers prefetch later batches. The HISTAI orchestrator defaults to batch 128, 4
+workers, prefetch 4, and 512 MiB per worker. Re-profile on different WSI formats,
+storage, models, or GPUs instead of treating these values as universal.
 
 ### Train Tile-EAF from the compact cache
 

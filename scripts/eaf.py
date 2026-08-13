@@ -183,6 +183,7 @@ def cmd_cache_tile(args: argparse.Namespace) -> None:
             worker_candidates=tuple(args.worker_candidates),
             prefetch_candidates=tuple(args.prefetch_candidates),
             benchmark_batches=args.benchmark_batches,
+            openslide_cache_bytes=args.openslide_cache_mib * 2**20,
         )
         print(json.dumps({"autotune": tuning_results, "selected": {
             "batch_size": batch_size,
@@ -222,9 +223,17 @@ def cmd_cache_tile(args: argparse.Namespace) -> None:
         compression=None if args.compression == "none" else args.compression,
         overwrite=args.overwrite,
         profile=args.profile_json is not None,
+        slide_loader_chunk_size=args.slide_loader_chunk_size,
+        persistent_workers=args.persistent_workers,
+        openslide_cache_bytes=args.openslide_cache_mib * 2**20,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[eaf-cache-tile] cache_id={spec.cache_id} n_slides={len(items)} batch_size={batch_size}")
+    print(
+        f"[eaf-cache-tile] cache_id={spec.cache_id} n_slides={len(items)} "
+        f"batch_size={batch_size} slide_loader_chunk_size={args.slide_loader_chunk_size} "
+        f"persistent_workers={args.persistent_workers} "
+        f"openslide_cache_mib={args.openslide_cache_mib}"
+    )
 
     rows = cache_many_slides(items, adapter=adapter, spec=spec, config=config)
     write_manifest(rows, args.output_dir / "manifest.csv")
@@ -442,6 +451,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size-candidates", type=int, nargs="+", default=[32, 64, 96])
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--prefetch-factor", type=int, default=2)
+    p.add_argument(
+        "--slide-loader-chunk-size", type=int, default=32,
+        help="WSIs sharing one DataLoader worker pool; 1 restores per-slide loaders",
+    )
+    p.add_argument(
+        "--persistent-workers", action=argparse.BooleanOptionalAction, default=True,
+        help="Reuse one worker pool across each WSI chunk",
+    )
+    p.add_argument(
+        "--openslide-cache-mib", type=int, default=0,
+        help="Decoded OpenSlide tile-cache capacity per DataLoader worker (0 uses the library default)",
+    )
     p.add_argument("--autotune", action="store_true", help="Benchmark real WSI reads without publishing cache before extraction")
     p.add_argument("--worker-candidates", type=int, nargs="+", default=[4, 8, 16])
     p.add_argument("--prefetch-candidates", type=int, nargs="+", default=[2, 4])

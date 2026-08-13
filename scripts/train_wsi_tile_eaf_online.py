@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
@@ -78,6 +80,8 @@ def _run_epoch(
     global_step: int,
     use_wandb: bool,
     cached_targets: bool,
+    skip_batches: int = 0,
+    on_step: Callable[[int, int], None] | None = None,
 ) -> tuple[dict[str, float], int]:
     forecaster.train(train)
     total = 0
@@ -86,8 +90,17 @@ def _run_epoch(
     if train:
         optimizer.zero_grad(set_to_none=True)
 
-    iterator = tqdm(loader, leave=False, desc="train" if train else "val")
+    iterator = tqdm(loader, leave=False, desc="train" if train else "val", initial=skip_batches)
     for batch_index, (images, batch_target) in enumerate(iterator):
+        # Fast-forward through an epoch resumed mid-way: the custom
+        # WSIBalancedBatchSampler is deterministic given set_epoch(), so
+        # re-iterating from batch 0 and skipping already-completed batches
+        # (rather than trying to seek the sampler/DataLoader workers
+        # directly) reproduces the same batch order. This still pays the
+        # data-loading cost for skipped batches but skips all forward/
+        # backward/optimizer compute for them.
+        if train and batch_index < skip_batches:
+            continue
         images = images.to(device, non_blocking=True)
         with torch.no_grad(), _autocast(device, amp_dtype):
             if cached_targets:
@@ -116,6 +129,8 @@ def _run_epoch(
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
+                if on_step is not None:
+                    on_step(batch_index, global_step)
                 if use_wandb and global_step % log_every == 0:
                     elapsed = max(time.perf_counter() - start, 1e-6)
                     wandb.log(
@@ -160,6 +175,81 @@ def _checkpoint_payload(model: AttentionForecaster, args: argparse.Namespace, ad
             "n_patches": adapter.n_patches,
             "num_prefix_tokens": adapter.num_prefix_tokens,
         },
+    }
+
+
+def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
+    """Write via a temp file + rename so a kill mid-save can't corrupt the checkpoint."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
+
+
+def _rng_state_payload() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    # Best-effort only: main-process RNG state is restored exactly, but the
+    # DataLoader's per-tile augmentation (random flips/rotations in
+    # WSITileDataset) runs in forked worker processes that PyTorch never
+    # deterministically reseeds from this state either way -- that's a
+    # pre-existing property of the pipeline, not something resume changes.
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("numpy") is not None:
+        np.random.set_state(state["numpy"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"])
+    if state.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def _resume_checkpoint_payload(
+    *,
+    forecaster: AttentionForecaster,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scaler: torch.amp.GradScaler,
+    args: argparse.Namespace,
+    adapter,
+    resume_epoch: int,
+    resume_skip_batches: int,
+    global_step: int,
+    best_val: float,
+    epochs_without_improvement: int,
+    history: list[dict[str, Any]],
+    wandb_run_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "format": "tile_eaf_resume_v1",
+        "model": forecaster.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
+        "config": vars(args),
+        "encoder": {
+            "embed_dim": adapter.embed_dim,
+            "n_blocks": adapter.n_blocks,
+            "n_patches": adapter.n_patches,
+            "num_prefix_tokens": adapter.num_prefix_tokens,
+        },
+        # Where the *next* run should pick up: either mid-epoch (same
+        # `resume_epoch`, skip the first `resume_skip_batches` train
+        # batches) or at a clean epoch boundary (`resume_skip_batches=0`).
+        "resume_epoch": resume_epoch,
+        "resume_skip_batches": resume_skip_batches,
+        "global_step": global_step,
+        "best_val": best_val,
+        "epochs_without_improvement": epochs_without_improvement,
+        "history": history,
+        "wandb_run_id": wandb_run_id,
+        "rng_state": _rng_state_payload(),
     }
 
 
@@ -211,6 +301,10 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--slide-cache-size", type=int, default=4)
+    parser.add_argument(
+        "--openslide-cache-mib", type=int, default=256,
+        help="Decoded OpenSlide tile-cache capacity per DataLoader worker (0 uses the library default)",
+    )
 
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -230,6 +324,22 @@ def main() -> None:
     parser.add_argument(
         "--output-dir", default=None,
         help="Defaults to checkpoints/tile_eaf/<model-name> (tile-encoder-dependent)",
+    )
+    parser.add_argument(
+        "--resume", default=None,
+        help=(
+            "Path to a `latest_*.pt` resume checkpoint (model+optimizer+scheduler+"
+            "scaler+epoch/step position+W&B run id). Continues the same W&B run "
+            "if it logged one; the rest of --wandb-* is ignored when resuming."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-every-steps", type=int, default=200,
+        help=(
+            "Save a resumable `latest_*.pt` checkpoint every N optimizer steps "
+            "within an epoch, in addition to always saving one at each epoch "
+            "boundary; 0 disables the mid-epoch checkpoint (epoch boundary only)"
+        ),
     )
     parser.add_argument("--wandb-project", default="eaf-tile-online")
     parser.add_argument("--wandb-entity", default=None)
@@ -262,7 +372,7 @@ def main() -> None:
 
     backbone, transform, _ = get_model_from_name(args.model_name, str(device))
     backbone = backbone.to(device).eval()
-    adapter = ThunderBackboneAdapter(backbone)
+    adapter = ThunderBackboneAdapter(backbone, transform=transform)
     target_layer = args.target_layer if args.target_layer is not None else adapter.n_blocks - 1
     if args.teacher_checkpoint:
         missing, unexpected = load_checkpoint_flexibly(backbone, args.teacher_checkpoint)
@@ -339,8 +449,18 @@ def main() -> None:
         num_workers=args.num_workers,
         prefetch_factor=args.prefetch_factor,
         slide_cache_size=args.slide_cache_size,
+        openslide_cache_bytes=args.openslide_cache_mib * 2**20,
         cohort_balance_power=args.cohort_balance_power,
         seed=args.seed,
+        # Reproduce the offline tile-cache pipeline's exact preprocessing
+        # (raw coordinate-window crop -> PIL BICUBIC resize to the encoder's
+        # real input size -> model transform, whose own Resize step then
+        # becomes a same-size no-op). Without this, the raw crop would go
+        # straight into `transform`, whose own Resize does the real
+        # downsampling with BILINEAR instead -- a measurable pixel mismatch
+        # between what `extract_early` sees online and what the cached
+        # `final_attention`/`tile_embeddings` were actually computed from.
+        resize_to=adapter.input_size,
     )
     print(
         f"WSI split: train={len(split_records['train'])} val={len(split_records['val'])}; "
@@ -372,6 +492,60 @@ def main() -> None:
     run_name = args.run_name or (
         f"{args.model_name}_src{args.source_layer:02d}_tgt{target_layer:02d}_online"
     )
+
+    # Resume state (overridden below if --resume is given). A fresh run
+    # starts at epoch 0 with nothing to skip.
+    start_epoch = 0
+    skip_batches_first_epoch = 0
+    global_step = 0
+    best_val = math.inf
+    epochs_without_improvement = 0
+    history: list[dict[str, Any]] = []
+    wandb_resume_id: str | None = None
+
+    if args.resume:
+        resume_path = Path(args.resume).expanduser().resolve()
+        resume_payload = torch.load(resume_path, map_location=device)
+        try:
+            forecaster.load_state_dict(resume_payload["model"])
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"--resume checkpoint {resume_path} is incompatible with the "
+                "current model architecture (--hidden/--n-heads/--n-layers/"
+                "--source-layer must match the run being resumed)"
+            ) from exc
+        if resume_payload.get("format") == "tile_eaf_resume_v1":
+            # Full-state resume: also restores optimizer/scheduler/scaler
+            # momentum and the exact epoch/step/W&B-run position.
+            optimizer.load_state_dict(resume_payload["optimizer"])
+            scheduler.load_state_dict(resume_payload["scheduler"])
+            scaler.load_state_dict(resume_payload["scaler"])
+            start_epoch = int(resume_payload["resume_epoch"])
+            skip_batches_first_epoch = int(resume_payload["resume_skip_batches"])
+            global_step = int(resume_payload["global_step"])
+            best_val = float(resume_payload["best_val"])
+            epochs_without_improvement = int(resume_payload["epochs_without_improvement"])
+            history = resume_payload["history"]
+            wandb_resume_id = resume_payload.get("wandb_run_id")
+            _restore_rng_state(resume_payload.get("rng_state", {}))
+            print(
+                f"Resumed from {resume_path}: epoch={start_epoch} "
+                f"skip_batches={skip_batches_first_epoch} global_step={global_step} "
+                f"best_val={best_val:.5f}"
+            )
+        else:
+            # Legacy/`best_*.pt`-style checkpoint: model weights only, no
+            # optimizer/scheduler/step bookkeeping to restore (predates this
+            # resume feature, or hyperparameters changed enough -- e.g.
+            # --batch-size -- that step/epoch counts wouldn't mean the same
+            # thing anyway). Warm-start the model from these weights and
+            # start a fresh optimizer/schedule/W&B run from epoch 0.
+            print(
+                f"Warm-started model weights from legacy checkpoint {resume_path} "
+                "(no optimizer/scheduler/step state to resume; training restarts "
+                "at epoch 0 with a fresh optimizer and W&B run)"
+            )
+
     use_wandb = args.wandb_mode != "disabled"
     if use_wandb:
         wandb.init(
@@ -380,6 +554,8 @@ def main() -> None:
             mode=args.wandb_mode,
             name=run_name,
             job_type="tile_eaf_online",
+            id=wandb_resume_id,
+            resume="must" if wandb_resume_id else None,
             config={
                 **vars(args),
                 "target_layer_resolved": target_layer,
@@ -397,16 +573,44 @@ def main() -> None:
                 "task_agnostic",
             ],
         )
+    wandb_run_id = wandb.run.id if use_wandb else None
 
-    best_val = math.inf
-    epochs_without_improvement = 0
-    history: list[dict[str, Any]] = []
-    global_step = 0
     checkpoint_path = output_dir / f"best_{run_name}.pt"
+    resume_checkpoint_path = output_dir / f"latest_{run_name}.pt"
 
-    for epoch in range(args.epochs):
+    def _save_resume_checkpoint(
+        *, resume_epoch: int, resume_skip_batches: int, step: int
+    ) -> None:
+        payload = _resume_checkpoint_payload(
+            forecaster=forecaster,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            args=args,
+            adapter=adapter,
+            resume_epoch=resume_epoch,
+            resume_skip_batches=resume_skip_batches,
+            global_step=step,
+            best_val=best_val,
+            epochs_without_improvement=epochs_without_improvement,
+            history=history,
+            wandb_run_id=wandb_run_id,
+        )
+        _atomic_torch_save(payload, resume_checkpoint_path)
+
+    for epoch in range(start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         val_sampler.set_epoch(0)
+        skip_batches = skip_batches_first_epoch if epoch == start_epoch else 0
+
+        def _on_step(batch_index: int, step: int, _epoch: int = epoch) -> None:
+            if args.checkpoint_every_steps > 0 and step % args.checkpoint_every_steps == 0:
+                _save_resume_checkpoint(
+                    resume_epoch=_epoch,
+                    resume_skip_batches=batch_index + 1,
+                    step=step,
+                )
+
         train_metrics, global_step = _run_epoch(
             forecaster=forecaster,
             teacher=teacher,
@@ -423,6 +627,8 @@ def main() -> None:
             global_step=global_step,
             use_wandb=use_wandb,
             cached_targets=bool(args.target_cache_index),
+            skip_batches=skip_batches,
+            on_step=_on_step,
         )
         val_metrics, global_step = _run_epoch(
             forecaster=forecaster,
@@ -454,9 +660,15 @@ def main() -> None:
         if improved:
             best_val = val_metrics["kl"]
             epochs_without_improvement = 0
-            torch.save(_checkpoint_payload(forecaster, args, adapter), checkpoint_path)
+            _atomic_torch_save(_checkpoint_payload(forecaster, args, adapter), checkpoint_path)
         else:
             epochs_without_improvement += 1
+        # Clean epoch-boundary resume point, saved after best_val/
+        # epochs_without_improvement are updated so a resume right after a
+        # crash here doesn't redo this epoch's early-stopping bookkeeping.
+        _save_resume_checkpoint(
+            resume_epoch=epoch + 1, resume_skip_batches=0, step=global_step
+        )
 
         if use_wandb:
             log = {

@@ -119,12 +119,16 @@ class CompactCachedWSITileDataset(WSITileDataset):
         augment: bool,
         slide_cache_size: int = 4,
         target_cache_size: int = 8,
+        openslide_cache_bytes: int = 0,
+        resize_to: int | None = None,
     ) -> None:
         super().__init__(
             records,
             transform,
             augment=augment,
             slide_cache_size=slide_cache_size,
+            openslide_cache_bytes=openslide_cache_bytes,
+            resize_to=resize_to,
         )
         missing = [record.slide_id for record in records if record.slide_id not in cache_paths]
         if missing:
@@ -145,7 +149,7 @@ class CompactCachedWSITileDataset(WSITileDataset):
         if key in self._target_handles:
             handle = self._target_handles.pop(key)
         else:
-            handle = h5py.File(key, "r")
+            handle = open_h5_with_retry(Path(key), "r")
         self._target_handles[key] = handle
         while len(self._target_handles) > self.target_cache_size:
             _, old = self._target_handles.popitem(last=False)
@@ -184,8 +188,10 @@ def build_compact_cache_tile_loaders(
     num_workers: int,
     prefetch_factor: int,
     slide_cache_size: int,
+    openslide_cache_bytes: int,
     cohort_balance_power: float,
     seed: int,
+    resize_to: int | None = None,
 ):
     """Build balanced loaders whose second item is cached final attention."""
     train_dataset = CompactCachedWSITileDataset(
@@ -194,10 +200,14 @@ def build_compact_cache_tile_loaders(
         # rotations, or crop jitter would require applying the identical transform
         # to the target grid; use the exact deterministic cache-time crop instead.
         augment=False, slide_cache_size=slide_cache_size,
+        openslide_cache_bytes=openslide_cache_bytes,
+        resize_to=resize_to,
     )
     val_dataset = CompactCachedWSITileDataset(
         split_records["val"], cache_paths, transform,
         augment=False, slide_cache_size=slide_cache_size,
+        openslide_cache_bytes=openslide_cache_bytes,
+        resize_to=resize_to,
     )
     train_sampler = WSIBalancedBatchSampler(
         split_records["train"], batch_size=batch_size,

@@ -38,13 +38,17 @@ TRIDENT_REPO
 HISTAI_DOWNLOAD_WORKERS
     default: 4
 CONCH_BATCH_SIZE
-    default: 64
+    default: 128
 CONCH_NUM_WORKERS
-    default: 8
+    default: 4
+CONCH_OPENSLIDE_CACHE_MIB
+    default: 512 per DataLoader worker; 0 uses the OpenSlide library default
 CONCH_COMPRESSION
     default: lzf; set to none after benchmarking storage/throughput on the target disk
 CONCH_AUTOTUNE
     default: 0; set to 1 to benchmark real WSI reads before each subset cache run
+CONCH_SLIDE_LOADER_CHUNK_SIZE
+    default: 32; WSIs that share one persistent DataLoader worker pool
 GPU_ID
     default: 0
 HISTAI_POLL_SECONDS
@@ -136,12 +140,21 @@ STATE_ROOT = ROOT / "catalog" / "histai_pipeline"
 LOG_ROOT = ROOT / "logs" / "histai_pipeline"
 
 DOWNLOAD_WORKERS = int(os.environ.get("HISTAI_DOWNLOAD_WORKERS", "4"))
-CONCH_BATCH_SIZE = int(os.environ.get("CONCH_BATCH_SIZE", "64"))
-CONCH_NUM_WORKERS = int(os.environ.get("CONCH_NUM_WORKERS", "8"))
+CONCH_BATCH_SIZE = int(os.environ.get("CONCH_BATCH_SIZE", "128"))
+CONCH_NUM_WORKERS = int(os.environ.get("CONCH_NUM_WORKERS", "4"))
+CONCH_OPENSLIDE_CACHE_MIB = int(os.environ.get("CONCH_OPENSLIDE_CACHE_MIB", "512"))
 CONCH_COMPRESSION = os.environ.get("CONCH_COMPRESSION", "lzf")
 CONCH_AUTOTUNE = os.environ.get("CONCH_AUTOTUNE", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
+CONCH_SLIDE_LOADER_CHUNK_SIZE = int(
+    os.environ.get("CONCH_SLIDE_LOADER_CHUNK_SIZE", "32")
+)
+# Post-run integrity re-check (see run_conch_cache) opens every cache HDF5's
+# metadata a second time -- an I/O-bound, per-file-independent operation that
+# releases the GIL during h5py reads, so a thread pool gives real wall-clock
+# speedup at corpus scale without changing behavior.
+CONCH_VALIDATE_WORKERS = int(os.environ.get("CONCH_VALIDATE_WORKERS", "8"))
 # TRIDENT's own per-WSI segmentation loop is strictly sequential (one slide at a time)
 # and was measured GPU-compute-bound only in bursts -- CPU (320 cores, <35% loadavg even
 # at 5-way parallel) and VRAM (~6.8 GiB/process on a 40 GiB A100) both have large headroom.
@@ -601,6 +614,27 @@ def build_extraction_registries(
     return slides_csv, coords_csv
 
 
+def _validate_cache_files(
+    h5_files: list[Path], *, max_workers: int = CONCH_VALIDATE_WORKERS
+) -> list[tuple[str, str]]:
+    """Validate every cache file in parallel.
+
+    Order-preserving (``executor.map``), so callers see the same "first N bad
+    files" as the serial loop this replaces -- only the wall-clock changes.
+    """
+    from src.wsi_pipeline.cache_io import validate_cache
+
+    def _validate_one(p: Path) -> tuple[str, str] | None:
+        try:
+            validate_cache(p, expected_kind="tile_eaf")
+        except Exception as exc:
+            return (str(p), repr(exc))
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return [row for row in ex.map(_validate_one, h5_files) if row is not None]
+
+
 def run_conch_cache(
     subset: str,
     coords_dir: Path,
@@ -659,6 +693,8 @@ def run_conch_cache(
         "--device", "cuda",
         "--batch-size", str(CONCH_BATCH_SIZE),
         "--num-workers", str(CONCH_NUM_WORKERS),
+        "--openslide-cache-mib", str(CONCH_OPENSLIDE_CACHE_MIB),
+        "--slide-loader-chunk-size", str(CONCH_SLIDE_LOADER_CHUNK_SIZE),
         "--storage-dtype", "float16",
         "--compression", CONCH_COMPRESSION,
         "--profile-json", str(LOG_ROOT / f"{subset}.conch_v15_profile.json"),
@@ -684,14 +720,7 @@ def run_conch_cache(
             f"{subset}: only {len(h5_files)} cache HDF5 for {len(edf)} WSIs"
         )
 
-    from src.wsi_pipeline.cache_io import validate_cache
-
-    bad = []
-    for p in h5_files:
-        try:
-            validate_cache(p, expected_kind="tile_eaf")
-        except Exception as exc:
-            bad.append((str(p), repr(exc)))
+    bad = _validate_cache_files(h5_files)
     if bad:
         raise RuntimeError(
             f"{subset}: {len(bad)} cache files fail validate_cache(); first={bad[:3]}"

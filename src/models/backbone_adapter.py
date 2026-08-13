@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch.nn as nn
 
 
@@ -16,6 +18,16 @@ class ThunderBackboneAdapter:
 
     Args:
         model: raw backbone from get_model_from_name (first element of the tuple).
+        transform: optional preprocessing transform, the second element of
+            get_model_from_name's return tuple. ``patch_embed.num_patches`` is a
+            build-time value baked in from the model's *configured* img_size
+            (e.g. CONCH v1.5/titan is configured at 224, giving a stale 196) and
+            is silently wrong whenever the model's own transform actually runs
+            at a different resolution (CONCH v1.5 resizes to 448, a real 28x28=784
+            grid via its Conv2d patch_embed, which has no fixed spatial output size).
+            When ``transform`` is given, ``n_patches`` is recomputed from the
+            transform's real crop size and the patch_embed's true patch size
+            instead of trusting the stale config value.
 
     Attributes:
         embed_dim (int):          Token embedding dimension.
@@ -24,7 +36,7 @@ class ThunderBackboneAdapter:
         num_prefix_tokens (int):  Number of CLS + register tokens prepended to the sequence.
     """
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, transform: Any = None):
         core_model = self._resolve_timm(model)
         if core_model is None:
             raise NotImplementedError(
@@ -39,6 +51,40 @@ class ThunderBackboneAdapter:
         self.n_blocks: int = len(core_model.blocks)
         self.num_prefix_tokens: int = core_model.num_prefix_tokens
         self.n_patches: int = core_model.patch_embed.num_patches
+        self.input_size: int | None = None
+        if transform is not None:
+            crop_size = self._infer_crop_size(transform)
+            self.input_size = crop_size
+            patch_size = self._infer_patch_size(core_model)
+            if crop_size is not None and patch_size is not None and patch_size > 0:
+                real_side = crop_size // patch_size
+                self.n_patches = real_side * real_side
+
+    @staticmethod
+    def _infer_crop_size(transform: Any) -> int | None:
+        """Best-effort read of a torchvision Compose's Resize/CenterCrop target size."""
+        from torchvision import transforms as T
+
+        steps = getattr(transform, "transforms", None)
+        if steps is None:
+            return None
+        for step in reversed(steps):
+            if isinstance(step, (T.CenterCrop, T.Resize)):
+                size = step.size
+                if isinstance(size, (tuple, list)):
+                    return int(size[0])
+                if isinstance(size, int):
+                    return size
+        return None
+
+    @staticmethod
+    def _infer_patch_size(core_model: nn.Module) -> int | None:
+        patch_size = getattr(core_model.patch_embed, "patch_size", None)
+        if isinstance(patch_size, (tuple, list)):
+            return int(patch_size[0])
+        if isinstance(patch_size, int):
+            return patch_size
+        return None
 
     @staticmethod
     def _detect_timm(model: nn.Module) -> bool:

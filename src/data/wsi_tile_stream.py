@@ -219,6 +219,21 @@ def load_wsi_manifest(
 
         slide_id = (row.get("slide_id") or Path(row.get("file_name", "")).stem).strip()
         case_id = (row.get("case_id") or slide_id).strip()
+        # HISTAI (and likely other sources) number case_id sequentially *within*
+        # each cohort, restarting near 0 -- it is NOT a globally unique patient
+        # identifier. Across this corpus's 7 cohorts, 2,327 of 2,836 unique
+        # case_id strings collide across cohorts (mostly HISTAI-breast and
+        # HISTAI-skin-b1, both zero-padded 4 digits from case_0000), and those
+        # are different real patients that happen to share a coincidental
+        # numeric label. Hashing/grouping on bare case_id therefore couples
+        # unrelated cohorts' split assignment together (whichever numeric slot
+        # hashes to val is identical across every affected cohort), which
+        # skewed observed per-cohort val fractions to 6.7%-12.9% instead of
+        # the nominal 10%. `split_key` scopes the case-disjoint guarantee to
+        # (cohort, case_id) -- the same real case_id within one cohort still
+        # always lands in the same split, but different cohorts' splits are
+        # no longer coincidentally coupled by shared local numbering.
+        split_key = f"{cohort}:{case_id}"
         raw_value = (row.get("raw_path") or row.get("wsi_path") or "").strip()
         coords_value = (row.get("coords_path") or "").strip()
         if not raw_value or not coords_value:
@@ -240,13 +255,13 @@ def load_wsi_manifest(
         if explicit not in {"train", "val", "test"}:
             explicit = (
                 "val"
-                if _stable_unit_interval(case_id, split_seed) < val_fraction
+                if _stable_unit_interval(split_key, split_seed) < val_fraction
                 else "train"
             )
-        previous = case_splits.setdefault(case_id, explicit)
+        previous = case_splits.setdefault(split_key, explicit)
         if previous != explicit:
             raise ValueError(
-                f"Case {case_id!r} appears in multiple splits: {previous}, {explicit}"
+                f"Case {split_key!r} appears in multiple splits: {previous}, {explicit}"
             )
 
         (
@@ -298,12 +313,31 @@ class WSITileDataset(Dataset):
         augment: bool,
         slide_cache_size: int = 4,
         coordinate_cache_size: int = 8,
+        openslide_cache_bytes: int = 0,
+        resize_to: int | None = None,
     ) -> None:
         self.records = list(records)
         self.transform = transform
         self.augment = augment
+        # The offline tile-cache pipeline (src/wsi_pipeline/patch_dataset.py's
+        # OpenSlideCoordinateDataset) resizes the raw coordinate-window crop to
+        # the encoder's real input size with PIL BICUBIC *before* handing it to
+        # the model's own transform (whose own Resize step then becomes a
+        # same-size no-op). If this dataset instead fed the raw crop straight
+        # into `transform` (whose Resize actually does the 512->input_size
+        # downsample, but with BILINEAR), the pixels feeding the online
+        # `extract_early` recompute would be measurably different from the
+        # ones the cache's `final_attention`/`tile_embeddings` were computed
+        # from for the identical tile (verified: up to 0.14 max abs diff in
+        # the normalized tensor, ~1.2% of values differing by >0.01 -- edge
+        # pixels, where BICUBIC vs BILINEAR diverge most). `resize_to` lets
+        # callers reproduce the exact cache-time preprocessing instead.
+        self.resize_to = resize_to
         self.slide_cache_size = max(1, slide_cache_size)
         self.coordinate_cache_size = max(1, coordinate_cache_size)
+        self.openslide_cache_bytes = int(openslide_cache_bytes)
+        if self.openslide_cache_bytes < 0:
+            raise ValueError("openslide_cache_bytes must be non-negative")
         self._slide_cache: OrderedDict[str, Any] | None = None
         self._coord_cache: OrderedDict[str, np.ndarray] | None = None
 
@@ -337,6 +371,8 @@ class WSITileDataset(Dataset):
                 "openslide-python and the OpenSlide shared library are required"
             ) from exc
         slide = openslide.OpenSlide(key)
+        if self.openslide_cache_bytes:
+            slide.set_cache(openslide.OpenSlideCache(self.openslide_cache_bytes))
         self._slide_cache[key] = slide
         while len(self._slide_cache) > self.slide_cache_size:
             _, old = self._slide_cache.popitem(last=False)
@@ -387,6 +423,8 @@ class WSITileDataset(Dataset):
             rotations = random.randrange(4)
             if rotations:
                 tile = tile.rotate(90 * rotations, expand=False)
+        if self.resize_to is not None and tile.size != (self.resize_to, self.resize_to):
+            tile = tile.resize((self.resize_to, self.resize_to), Image.Resampling.BICUBIC)
         image = self.transform(tile) if self.transform is not None else tile
         return image, int(slide_index)
 
@@ -460,7 +498,7 @@ class WSIBalancedBatchSampler(Sampler[list[tuple[int, int]]]):
 
     def _select_slides(self) -> list[int]:
         targets = self._cohort_targets()
-        selected: list[int] = []
+        per_cohort_chosen: dict[str, list[int]] = {}
         for cohort, target in targets.items():
             indices = self.by_cohort[cohort]
             cohort_hash = int.from_bytes(
@@ -478,9 +516,41 @@ class WSIBalancedBatchSampler(Sampler[list[tuple[int, int]]]):
                 rolled = np.roll(perm, -offset).tolist()
                 repeats = math.ceil(target / len(rolled))
                 chosen = (rolled * repeats)[:target]
-            selected.extend(int(x) for x in chosen)
-        np.random.default_rng(self.seed + self.epoch * 7919).shuffle(selected)
-        return selected
+            per_cohort_chosen[cohort] = [int(x) for x in chosen]
+
+        # Round-robin interleave across cohorts *before* chunking into
+        # slides_per_batch groups, so an individual batch mixes cohorts
+        # instead of only the epoch-level proportions being balanced. A
+        # naive concat-then-global-shuffle (the previous approach) can still
+        # place slides_per_batch consecutive slides from the same large
+        # cohort in one batch purely by chance, which is a real source of
+        # batch-to-batch loss variance when cohort sizes are very uneven
+        # (e.g. HISTAI-breast: 1687 vs HISTAI-colorectal-b2: 62).
+        cohort_order = sorted(per_cohort_chosen)
+        rng_order = np.random.default_rng(self.seed + self.epoch * 7919)
+        rng_order.shuffle(cohort_order)  # vary which cohort leads the cycle each epoch
+        cursors = {cohort: 0 for cohort in cohort_order}
+        interleaved: list[int] = []
+        remaining = sum(len(v) for v in per_cohort_chosen.values())
+        while remaining > 0:
+            for cohort in cohort_order:
+                pos = cursors[cohort]
+                bucket = per_cohort_chosen[cohort]
+                if pos >= len(bucket):
+                    continue
+                interleaved.append(bucket[pos])
+                cursors[cohort] = pos + 1
+                remaining -= 1
+
+        # Shuffle the order of already-formed slides_per_batch groups (not
+        # the elements within a group) so batch order still varies epoch to
+        # epoch without destroying the cohort interleaving inside a group.
+        groups = [
+            interleaved[i : i + self.slides_per_batch]
+            for i in range(0, len(interleaved), self.slides_per_batch)
+        ]
+        rng_order.shuffle(groups)
+        return [index for group in groups for index in group]
 
     def _coord_sample(self, slide_index: int, rng: np.random.Generator) -> list[int]:
         n = self.records[slide_index].coord_count
@@ -540,20 +610,26 @@ def build_online_tile_loaders(
     num_workers: int,
     prefetch_factor: int,
     slide_cache_size: int,
+    openslide_cache_bytes: int,
     cohort_balance_power: float,
     seed: int,
+    resize_to: int | None = None,
 ) -> tuple[DataLoader, DataLoader, WSIBalancedBatchSampler, WSIBalancedBatchSampler]:
     train_dataset = WSITileDataset(
         split_records["train"],
         transform,
         augment=True,
         slide_cache_size=slide_cache_size,
+        openslide_cache_bytes=openslide_cache_bytes,
+        resize_to=resize_to,
     )
     val_dataset = WSITileDataset(
         split_records["val"],
         transform,
         augment=False,
         slide_cache_size=slide_cache_size,
+        openslide_cache_bytes=openslide_cache_bytes,
+        resize_to=resize_to,
     )
     train_sampler = WSIBalancedBatchSampler(
         split_records["train"],

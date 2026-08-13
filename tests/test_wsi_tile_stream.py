@@ -175,6 +175,41 @@ def test_dataset_center_crops_encoder_fov(tmp_path: Path, monkeypatch) -> None:
     assert slide_index == 0
     assert calls == [((356, 456), 0, (512, 512))]
 
+
+def test_dataset_installs_worker_local_openslide_cache(tmp_path: Path, monkeypatch) -> None:
+    coords_path = tmp_path / "coords.h5"
+    _write_coords(coords_path, count=1)
+    installed = []
+
+    class FakeCache:
+        def __init__(self, capacity: int) -> None:
+            self.capacity = capacity
+
+    class FakeSlide:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def set_cache(self, cache) -> None:
+            installed.append(cache.capacity)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "openslide",
+        type("FakeOpenSlideModule", (), {"OpenSlide": FakeSlide, "OpenSlideCache": FakeCache})(),
+    )
+    record = _record(0, "A")
+    record = SlideRecord(**{**record.__dict__, "raw_path": tmp_path / "slide.svs", "coords_path": coords_path, "coord_count": 1})
+    dataset = WSITileDataset(
+        [record], transform=None, augment=False,
+        openslide_cache_bytes=512 * 2**20,
+    )
+
+    dataset._get_slide(record.raw_path)
+
+    assert installed == [512 * 2**20]
+
 def _record(index: int, cohort: str) -> SlideRecord:
     return SlideRecord(
         slide_id=f"slide-{index}",

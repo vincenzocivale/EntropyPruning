@@ -158,6 +158,10 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--slide-cache-size", type=int, default=4)
+    parser.add_argument(
+        "--openslide-cache-mib", type=int, default=256,
+        help="Decoded OpenSlide tile-cache capacity per DataLoader worker",
+    )
 
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -209,7 +213,7 @@ def main() -> None:
             f"missing={len(missing)} unexpected={len(unexpected)}"
         )
     student_backbone = student_backbone.to(device)
-    adapter = ThunderBackboneAdapter(student_backbone)
+    adapter = ThunderBackboneAdapter(student_backbone, transform=transform)
     forecaster = AttentionForecaster(
         embed_dim=adapter.embed_dim,
         hidden=args.hidden,
@@ -280,6 +284,7 @@ def main() -> None:
         num_workers=args.num_workers,
         prefetch_factor=args.prefetch_factor,
         slide_cache_size=args.slide_cache_size,
+        openslide_cache_bytes=args.openslide_cache_mib * 2**20,
         cohort_balance_power=args.cohort_balance_power,
         seed=args.seed,
     )

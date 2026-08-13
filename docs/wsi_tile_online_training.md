@@ -15,7 +15,8 @@ from WSI files and generates all teacher signals on the fly.
 4. **Task independence.** Neither stage uses downstream labels or a
    dataset-specific classification head.
 5. **Efficient I/O and GPU use.** Batches group several tiles from a small
-   number of WSI files, DataLoader workers keep LRU OpenSlide/coordinate caches,
+   number of WSI files, DataLoader workers keep LRU OpenSlide/coordinate caches and
+   configurable decoded-tile caches,
    and training uses mixed precision, pinned memory, persistent workers, TF32,
    and gradient accumulation.
 
@@ -78,6 +79,7 @@ python scripts/train_wsi_tile_eaf_online.py \
   --batch-size 32 \
   --slides-per-batch 4 \
   --num-workers 8 \
+  --openslide-cache-mib 256 \
   --amp-dtype bf16 \
   --early-stopping-patience 6 \
   --wandb-project eaf-tile-online
@@ -125,6 +127,7 @@ python scripts/finetune_wsi_tile_encoder_pruned_online.py \
   --slides-per-batch 4 \
   --grad-accum 2 \
   --num-workers 8 \
+  --openslide-cache-mib 256 \
   --amp-dtype bf16 \
   --gradient-checkpointing \
   --early-stopping-patience 5 \
@@ -149,6 +152,40 @@ holding two foundation models.
 
 Only trainable LoRA tensors are saved. Downstream heads remain separate and can
 be trained later for evaluation without changing the task-agnostic EAF stage.
+
+## OpenSlide and DataLoader tuning
+
+Both training stages reuse persistent DataLoader workers and worker-local LRU caches
+for WSI handles and coordinate arrays. ``--openslide-cache-mib`` additionally sets the
+decoded-tile cache on every OpenSlide handle. This extraction optimization also applies
+directly to training because training rereads raw pixels every epoch. Capacity is per
+handle, and each worker may retain up to ``--slide-cache-size`` handles. A conservative
+upper host-RAM budget is therefore:
+
+```text
+num_workers * slide_cache_size * openslide_cache_mib
+```
+
+Actual residency is normally lower, but monitor it on long runs. Start with 4 workers,
+``--slide-cache-size 2`` and 256 MiB, then measure end-to-end training tiles/s. The
+extraction result of batch 128 must not be copied blindly to training: early-layer
+teacher inference, forecaster backward, optimizer state, augmentation and validation
+have a different GPU-memory and CPU profile. Tune its batch size separately and use
+gradient accumulation when a larger effective batch is desired.
+
+Increasing workers cannot parallelize construction of one batch: PyTorch assigns the
+batch index list to one worker. The balanced sampler already limits each batch to a
+small set of WSI, but random coordinates have weaker spatial locality than sequential
+cache extraction. If data wait remains material, the next optimization to evaluate is
+batched spatial reordering inside ``Dataset.__getitems__`` while restoring the original
+sampler order before collation.
+
+For scale, sampling 24 random coordinates from each of 100 HISTAI slides produced a
+23.3% theoretical decoded-block reuse rate. Once the samples were split into the three
+8-tile-per-slide rounds that may be handled by different workers, within-round reuse
+was only 8.6%. This supports a smaller training default (256 MiB) than sequential cache
+extraction (512 MiB), and means the option should be benchmarked rather than assumed to
+reproduce extraction's throughput gain.
 
 ## Weights & Biases and early stopping
 
