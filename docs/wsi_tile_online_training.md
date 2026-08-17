@@ -176,9 +176,27 @@ gradient accumulation when a larger effective batch is desired.
 Increasing workers cannot parallelize construction of one batch: PyTorch assigns the
 batch index list to one worker. The balanced sampler already limits each batch to a
 small set of WSI, but random coordinates have weaker spatial locality than sequential
-cache extraction. If data wait remains material, the next optimization to evaluate is
-batched spatial reordering inside ``Dataset.__getitems__`` while restoring the original
-sampler order before collation.
+cache extraction. The dataset therefore reorders reads spatially inside
+``Dataset.__getitems__`` and restores the original sampler order before collation. This
+improves decoded-block reuse without changing image/target pairing or optimizer order.
+
+Use ``--profile-json /path/to/profile.json`` on a representative short run to measure
+DataLoader wait, early-teacher, forecaster, backward and metric time separately. Profiling
+adds CUDA synchronizations and should not be enabled for production epochs. Training
+Spearman/top-k metrics are disabled by default because their per-batch sorting and scalar
+copies do not affect optimization; validation still computes them exactly. Set
+``--train-ranking-every N`` when sampled training diagnostics are useful. Experimental
+``--compile`` compiles only the forecaster and keeps checkpoint keys compatible; retain
+it only after benchmarking on the installed PyTorch/CUDA stack.
+
+For an apples-to-apples throughput comparison, run the same small manifest, cache index,
+seed, WSI/tile budgets and validation budget twice. First omit ``--compile`` and record
+``--profile-json ...baseline.json``; then repeat with ``--compile`` and otherwise identical
+arguments. Discard the first compiled epoch when assessing steady-state throughput because
+it includes graph compilation. Use the reported phase totals to choose the next tuning
+axis: batch size for teacher/forecaster time, or workers/prefetch/OpenSlide cache for data
+wait. Never compare runs with different tile budgets; non-divisible ``--tiles-per-wsi``
+values are now honored exactly instead of being padded to a full batch round.
 
 For scale, sampling 24 random coordinates from each of 100 HISTAI slides produced a
 23.3% theoretical decoded-block reuse rate. Once the samples were split into the three

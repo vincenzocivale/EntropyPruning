@@ -27,6 +27,9 @@ from src.models.online_tile_eaf import (
     unwrap_checkpoint_state,
 )
 from src.utils import set_seed
+from src.wsi_pipeline.cache_index import read_tile_cache_index
+from src.wsi_pipeline.cache_io import validate_cache
+from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
 
 
 def _autocast(device: torch.device, amp_dtype: str):
@@ -51,6 +54,7 @@ def _run_epoch(
     global_step: int,
     log_every: int,
     use_wandb: bool,
+    cached_targets: bool,
 ) -> tuple[dict[str, float], int]:
     student.train(train)
     sums = {"loss": 0.0, "cosine": 0.0, "mse": 0.0, "pairwise": 0.0}
@@ -59,12 +63,20 @@ def _run_epoch(
     if train:
         optimizer.zero_grad(set_to_none=True)
 
-    for batch_index, (images, _) in enumerate(
+    for batch_index, (images, cached_target) in enumerate(
         tqdm(loader, leave=False, desc="train" if train else "val")
     ):
         images = images.to(device, non_blocking=True)
-        with torch.no_grad(), _autocast(device, amp_dtype):
-            teacher_embedding = student.full_teacher_embedding(images)
+        if cached_targets:
+            # Precomputed by `eaf.py cache tile` -- the frozen unpruned model's
+            # final embedding for this exact tile, computed once at cache-build
+            # time. Reusing it here skips a second full-depth forward pass through
+            # the (unpruned) backbone every step, which is otherwise the dominant
+            # extra cost of this trainer vs. train_wsi_tile_eaf_online.py.
+            teacher_embedding = cached_target.to(device, non_blocking=True).float()
+        else:
+            with torch.no_grad(), _autocast(device, amp_dtype):
+                teacher_embedding = student.full_teacher_embedding(images)
         with torch.set_grad_enabled(train), _autocast(device, amp_dtype):
             student_embedding = student(images)
             loss, components = embedding_distillation_loss(
@@ -120,6 +132,15 @@ def main() -> None:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--forecaster-ckpt", required=True)
     parser.add_argument("--teacher-checkpoint", default=None)
+    parser.add_argument(
+        "--target-cache-index",
+        default=None,
+        help=(
+            "Validated index from `eaf.py cache index-tile`; when given, the "
+            "cache's tile_embeddings are used as the distillation target instead "
+            "of a live unpruned forward pass every step."
+        ),
+    )
     parser.add_argument("--prune-layer", type=int, default=2)
     parser.add_argument("--keep-ratio", type=float, default=0.1)
     parser.add_argument("--hidden", type=int, default=256)
@@ -272,9 +293,57 @@ def main() -> None:
         )
     resolved_train_wsis -= resolved_train_wsis % args.slides_per_batch
     resolved_train_wsis = max(args.slides_per_batch, resolved_train_wsis)
-    train_loader, val_loader, train_sampler, val_sampler = build_online_tile_loaders(
-        split_records,
-        transform,
+    loader_builder = build_online_tile_loaders
+    loader_args: tuple[Any, ...] = (split_records, transform)
+    loader_kwargs: dict[str, Any] = {}
+    cached_targets = bool(args.target_cache_index)
+    if cached_targets:
+        if (
+            args.tile_size_at_target_mag is not None
+            and args.tile_size_at_target_mag != args.default_patch_size
+        ):
+            raise ValueError(
+                "Compact-cache distillation must reread the exact cache-time field "
+                "of view; omit --tile-size-at-target-mag or set it equal to "
+                "--default-patch-size"
+            )
+        cache_paths = read_tile_cache_index(args.target_cache_index)
+        first_cache = next(iter(cache_paths.values()))
+        cache_info = validate_cache(first_cache, expected_kind="tile_eaf")
+        cache_spec = cache_info["spec"]
+        cache_encoder = str(cache_spec.get("tile_encoder", ""))
+        compatible_names = {cache_encoder}
+        if cache_encoder == "conch_v15":
+            compatible_names.add("titan")
+        if args.model_name not in compatible_names:
+            raise ValueError(
+                f"Cache encoder={cache_encoder!r} is incompatible with "
+                f"--model-name={args.model_name!r}"
+            )
+        embedding_shape = cache_info["datasets"]["tile_embeddings"]
+        if len(embedding_shape) != 2:
+            raise ValueError(f"Cache tile_embeddings shape {embedding_shape} is not [N, D]")
+        # Not checked against adapter.embed_dim: that is the raw ViT trunk's hidden
+        # size (used for the forecaster's patch-token input and pruning-hook
+        # bookkeeping), not the model's final pooled-embedding size. TITAN/CONCH v1.5
+        # pools through an attentional-pooler head down to a smaller contrastive
+        # embedding dim (768) -- the same head PrunedLoRAEncoder.forward/
+        # full_teacher_embedding already run through, since both call the full
+        # wrapped model's forward(), not just the trunk. A real mismatch here would
+        # surface immediately and loudly as a broadcast error in
+        # embedding_distillation_loss.
+        loader_builder = build_compact_cache_tile_loaders
+        loader_args = (split_records, cache_paths, transform)
+        # Reproduce the offline tile-cache pipeline's exact preprocessing (raw
+        # coordinate-window crop -> PIL BICUBIC resize to the encoder's real input
+        # size -> model transform, whose own Resize step then becomes a same-size
+        # no-op) -- otherwise the pixels fed to the student's forward wouldn't match
+        # what the cached tile_embeddings target was actually computed from. See the
+        # identical rationale in train_wsi_tile_eaf_online.py.
+        loader_kwargs["resize_to"] = adapter.input_size
+        loader_kwargs["target_key"] = "tile_embeddings"
+    train_loader, val_loader, train_sampler, val_sampler = loader_builder(
+        *loader_args,
         batch_size=args.batch_size,
         slides_per_batch=args.slides_per_batch,
         train_slides_per_epoch=resolved_train_wsis,
@@ -287,6 +356,13 @@ def main() -> None:
         openslide_cache_bytes=args.openslide_cache_mib * 2**20,
         cohort_balance_power=args.cohort_balance_power,
         seed=args.seed,
+        **loader_kwargs,
+    )
+    print(
+        f"WSI split: train={len(split_records['train'])} val={len(split_records['val'])}; "
+        f"epoch={len(train_sampler)} batches/{resolved_train_wsis} WSI/"
+        f"~{resolved_train_wsis * args.tiles_per_wsi} tiles "
+        f"({'compact_cache' if cached_targets else 'online_teacher_forward'} targets)"
     )
 
     output_dir = (
@@ -315,7 +391,8 @@ def main() -> None:
                 "total_parameters": total_count,
                 "resolved_train_wsis_per_epoch": resolved_train_wsis,
                 "resolved_train_tiles_per_epoch": resolved_train_wsis * args.tiles_per_wsi,
-                "single_backbone_teacher_student": True,
+                "cached_targets": cached_targets,
+                "single_backbone_teacher_student": not cached_targets,
             },
             tags=[args.model_name, "pruned_tile_encoder", "online", "task_agnostic"],
         )
@@ -342,6 +419,7 @@ def main() -> None:
             global_step=global_step,
             log_every=args.log_every,
             use_wandb=use_wandb,
+            cached_targets=cached_targets,
         )
         val_metrics, global_step = _run_epoch(
             student=student,
@@ -358,6 +436,7 @@ def main() -> None:
             global_step=global_step,
             log_every=args.log_every,
             use_wandb=use_wandb,
+            cached_targets=cached_targets,
         )
         scheduler.step()
         row = {

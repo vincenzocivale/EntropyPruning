@@ -190,6 +190,30 @@ class OnlineAttentionTeacher:
     @torch.no_grad()
     def extract_early(self, images: torch.Tensor) -> torch.Tensor:
         """Return source-layer patch tokens and abort before later blocks execute."""
+        # Standard timm ViTs expose the complete token-preparation pipeline.
+        # Running it explicitly avoids installing hooks and throwing a Python
+        # exception on every batch.  Non-standard THUNDER wrappers retain the
+        # proven hook-based fallback below.
+        model = self.adapter.model
+        required = ("patch_embed", "_pos_embed", "patch_drop", "norm_pre", "blocks")
+        if all(hasattr(model, name) for name in required):
+            try:
+                x = model.patch_embed(images)
+                x = model._pos_embed(x)
+                x = model.patch_drop(x)
+                x = model.norm_pre(x)
+                for block_index in range(self.source_layer + 1):
+                    x = model.blocks[block_index](x)
+                return x[:, self.adapter.num_prefix_tokens :].detach()
+            except TypeError:
+                # Non-standard `_pos_embed` signature (e.g. titan/CONCH v1.5,
+                # whose Conv2d-based patch_embed has no fixed spatial output
+                # size and so needs explicit w/h args timm's own ViTs don't
+                # require) -- these attributes exist by name but aren't the
+                # plain-timm pipeline this fast path assumes. Fall through to
+                # the proven hook-based path below instead of crashing.
+                pass
+
         cache: dict[str, torch.Tensor] = {}
         prefix = self.adapter.num_prefix_tokens
         source_block = self.adapter.get_blocks()[self.source_layer]

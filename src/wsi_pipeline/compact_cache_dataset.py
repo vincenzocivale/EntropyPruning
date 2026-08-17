@@ -47,14 +47,17 @@ from src.data.wsi_tile_stream import SlideRecord, WSIBalancedBatchSampler, WSITi
 
 
 class CompactTileTargetDataset(Dataset):
-    """Yields ``(image, target_attention)`` for one slide from a compact Tile-EAF cache.
+    """Yields ``(image, target)`` for one slide from a compact Tile-EAF cache.
 
     ``image`` is the raw tile pixel crop, transformed exactly as the tile encoder
     expects (same ``transform``/``output_size`` used to build the cache). It does NOT
     include ``early_tokens`` -- callers run
     ``HookedViTTileTeacherAdapter.extract_early(images_batch, early_layer=...)`` on the
-    collated batch to get that online. ``target_attention`` is read straight from the
-    cache's ``final_attention`` array.
+    collated batch to get that online. ``target`` is read straight from the cache's
+    ``target_key`` array -- ``"final_attention"`` (the EAF forecaster's KL target,
+    default) or ``"tile_embeddings"`` (the frozen unpruned model's final per-tile
+    embedding, used as the pruned-encoder distillation target so that path never has
+    to re-run a full unpruned forward pass online).
 
     Row order is verified, not assumed: the compact cache's ``coords`` must exactly
     match the TRIDENT coords file's ``coords`` (both are written/read in the same
@@ -71,6 +74,7 @@ class CompactTileTargetDataset(Dataset):
         transform: Any,
         *,
         output_size: int,
+        target_key: str = "final_attention",
     ) -> None:
         self._pixels = OpenSlideCoordinateDataset(
             Path(wsi_path), Path(coords_path), transform, output_size=output_size
@@ -78,13 +82,14 @@ class CompactTileTargetDataset(Dataset):
         with open_h5_with_retry(Path(compact_cache_path), "r") as handle:
             if not bool(handle.attrs.get("complete", False)):
                 raise RuntimeError(f"Cache is not complete: {compact_cache_path}")
-            self.final_attention = np.asarray(handle["final_attention"][:], dtype=np.float32)
+            self.target_key = target_key
+            self.targets = np.asarray(handle[target_key][:], dtype=np.float32)
             cached_coords = np.asarray(handle["coords"][:])
 
-        if len(self._pixels) != len(self.final_attention):
+        if len(self._pixels) != len(self.targets):
             raise RuntimeError(
                 f"{coords_path}: {len(self._pixels)} coords vs "
-                f"{compact_cache_path}: {len(self.final_attention)} cached targets"
+                f"{compact_cache_path}: {len(self.targets)} cached {target_key!r} targets"
             )
         if not np.array_equal(self._pixels.coords[:, :2], cached_coords[:, :2]):
             raise RuntimeError(
@@ -97,7 +102,7 @@ class CompactTileTargetDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         image, _coord = self._pixels[index]
-        target = torch.from_numpy(self.final_attention[index])
+        target = torch.from_numpy(self.targets[index])
         return image, target
 
 
@@ -121,6 +126,7 @@ class CompactCachedWSITileDataset(WSITileDataset):
         target_cache_size: int = 8,
         openslide_cache_bytes: int = 0,
         resize_to: int | None = None,
+        target_key: str = "final_attention",
     ) -> None:
         super().__init__(
             records,
@@ -135,6 +141,7 @@ class CompactCachedWSITileDataset(WSITileDataset):
             raise RuntimeError(f"Missing compact caches for {len(missing)} slides: {missing[:5]}")
         self.cache_paths = {key: Path(value) for key, value in cache_paths.items()}
         self.target_cache_size = max(1, int(target_cache_size))
+        self.target_key = target_key
         self._target_handles: OrderedDict[str, h5py.File] | None = None
 
     def __getstate__(self) -> dict[str, Any]:
@@ -154,7 +161,7 @@ class CompactCachedWSITileDataset(WSITileDataset):
         while len(self._target_handles) > self.target_cache_size:
             _, old = self._target_handles.popitem(last=False)
             old.close()
-        return torch.from_numpy(np.asarray(handle["final_attention"][coord_index], dtype=np.float32))
+        return torch.from_numpy(np.asarray(handle[self.target_key][coord_index], dtype=np.float32))
 
     def __getitem__(self, index: tuple[int, int]) -> tuple[torch.Tensor, torch.Tensor]:
         slide_index, coord_index = (int(index[0]), int(index[1]))
@@ -163,6 +170,17 @@ class CompactCachedWSITileDataset(WSITileDataset):
             raise RuntimeError("WSI dataset returned an unexpected slide index")
         target = self._target(self.records[slide_index], coord_index)
         return image, target
+
+    def __getitems__(
+        self, indices: list[tuple[int, int]]
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        # Reuse the parent's spatially ordered pixel reads, then attach targets
+        # in the original sampler order.  This preserves exact image/target pairs.
+        images = super().__getitems__(indices)
+        return [
+            (item[0], self._target(self.records[int(index[0])], int(index[1])))
+            for item, index in zip(images, indices)
+        ]
 
     def __del__(self) -> None:
         handles = getattr(self, "_target_handles", None)
@@ -192,22 +210,32 @@ def build_compact_cache_tile_loaders(
     cohort_balance_power: float,
     seed: int,
     resize_to: int | None = None,
+    target_key: str = "final_attention",
 ):
-    """Build balanced loaders whose second item is cached final attention."""
+    """Build balanced loaders whose second item is a cached per-tile target.
+
+    ``target_key`` selects which cached array is yielded as the target:
+    ``"final_attention"`` (default, EAF forecaster's KL target) or
+    ``"tile_embeddings"`` (frozen unpruned model's final per-tile embedding, used by
+    the pruned-encoder distillation trainer).
+    """
     train_dataset = CompactCachedWSITileDataset(
         split_records["train"], cache_paths, transform,
-        # Cached attention has spatial patch-token semantics. Random flips,
-        # rotations, or crop jitter would require applying the identical transform
-        # to the target grid; use the exact deterministic cache-time crop instead.
+        # Cached targets have a fixed per-tile/per-patch-token layout keyed to the
+        # exact cache-time crop. Random flips, rotations, or crop jitter would
+        # require applying the identical transform to the target; use the exact
+        # deterministic cache-time crop instead.
         augment=False, slide_cache_size=slide_cache_size,
         openslide_cache_bytes=openslide_cache_bytes,
         resize_to=resize_to,
+        target_key=target_key,
     )
     val_dataset = CompactCachedWSITileDataset(
         split_records["val"], cache_paths, transform,
         augment=False, slide_cache_size=slide_cache_size,
         openslide_cache_bytes=openslide_cache_bytes,
         resize_to=resize_to,
+        target_key=target_key,
     )
     train_sampler = WSIBalancedBatchSampler(
         split_records["train"], batch_size=batch_size,

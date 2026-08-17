@@ -72,6 +72,7 @@ def _run_epoch(
     scaler,
     device: torch.device,
     amp_dtype: str,
+    kl_weight: float,
     rank_loss_weight: float,
     keep_ratio_metric: float,
     grad_accum: int,
@@ -80,18 +81,34 @@ def _run_epoch(
     global_step: int,
     use_wandb: bool,
     cached_targets: bool,
+    train_ranking_every: int = 0,
+    profile: bool = False,
     skip_batches: int = 0,
     on_step: Callable[[int, int], None] | None = None,
 ) -> tuple[dict[str, float], int]:
     forecaster.train(train)
     total = 0
-    sums = {"loss": 0.0, "kl": 0.0, "rank": 0.0, "rho": 0.0, "topk_recall": 0.0}
+    ranking_total = 0
+    sums = {
+        key: torch.zeros((), device=device)
+        for key in ("loss", "kl", "rank", "rho", "topk_recall")
+    }
+    phase_seconds = {"data_wait": 0.0, "teacher": 0.0, "forecaster": 0.0, "backward": 0.0, "metrics": 0.0}
     start = time.perf_counter()
     if train:
         optimizer.zero_grad(set_to_none=True)
 
-    iterator = tqdm(loader, leave=False, desc="train" if train else "val", initial=skip_batches)
+    # Note: `enumerate(iterator)` below still pulls every item from `loader`
+    # (all len(loader) of them) even when the first `skip_batches` are
+    # skipped via `continue` -- tqdm's own counter therefore already runs
+    # 0..len(loader) correctly on its own. Passing `initial=skip_batches`
+    # here would double-count (tqdm adds its per-pull increments on top of
+    # that initial offset instead of replacing them), overshooting the true
+    # total and breaking the percentage display once n > total.
+    iterator = tqdm(loader, leave=False, desc="train" if train else "val")
+    data_ready = time.perf_counter()
     for batch_index, (images, batch_target) in enumerate(iterator):
+        phase_seconds["data_wait"] += time.perf_counter() - data_ready
         # Fast-forward through an epoch resumed mid-way: the custom
         # WSIBalancedBatchSampler is deterministic given set_epoch(), so
         # re-iterating from batch 0 and skipping already-completed batches
@@ -100,14 +117,22 @@ def _run_epoch(
         # data-loading cost for skipped batches but skips all forward/
         # backward/optimizer compute for them.
         if train and batch_index < skip_batches:
+            data_ready = time.perf_counter()
             continue
         images = images.to(device, non_blocking=True)
+        if profile:
+            torch.cuda.synchronize(device)
+        phase_start = time.perf_counter()
         with torch.no_grad(), _autocast(device, amp_dtype):
             if cached_targets:
                 source_tokens = teacher.extract_early(images)
                 target_attention = batch_target.to(device, non_blocking=True)
             else:
                 source_tokens, target_attention = teacher.extract(images)
+        if profile:
+            torch.cuda.synchronize(device)
+        phase_seconds["teacher"] += time.perf_counter() - phase_start
+        phase_start = time.perf_counter()
         with torch.set_grad_enabled(train), _autocast(device, amp_dtype):
             logits = forecaster(source_tokens)
             kl = F.kl_div(
@@ -116,9 +141,13 @@ def _run_epoch(
                 reduction="batchmean",
             )
             rank_loss = _rank_alignment_loss(logits, target_attention)
-            loss = kl + rank_loss_weight * rank_loss
+            loss = kl_weight * kl + rank_loss_weight * rank_loss
+        if profile:
+            torch.cuda.synchronize(device)
+        phase_seconds["forecaster"] += time.perf_counter() - phase_start
 
         if train:
+            phase_start = time.perf_counter()
             scaled_loss = loss / grad_accum
             scaler.scale(scaled_loss).backward()
             should_step = (batch_index + 1) % grad_accum == 0 or batch_index + 1 == len(loader)
@@ -144,24 +173,45 @@ def _run_epoch(
                         },
                         step=global_step,
                     )
+            if profile:
+                torch.cuda.synchronize(device)
+            phase_seconds["backward"] += time.perf_counter() - phase_start
 
         batch_size = images.shape[0]
-        with torch.no_grad():
-            rho = _spearman(logits.float(), target_attention.float()).mean()
-            recall = _topk_recall(
-                logits.float(), target_attention.float(), keep_ratio_metric
-            ).mean()
+        measure_ranking = not train or (
+            train_ranking_every > 0 and batch_index % train_ranking_every == 0
+        )
+        phase_start = time.perf_counter()
+        if measure_ranking:
+            with torch.no_grad():
+                rho = _spearman(logits.float(), target_attention.float()).mean()
+                recall = _topk_recall(
+                    logits.float(), target_attention.float(), keep_ratio_metric
+                ).mean()
+            sums["rho"] += rho.detach() * batch_size
+            sums["topk_recall"] += recall.detach() * batch_size
+            ranking_total += batch_size
+        if profile:
+            torch.cuda.synchronize(device)
+        phase_seconds["metrics"] += time.perf_counter() - phase_start
         total += batch_size
-        sums["loss"] += float(loss.detach()) * batch_size
-        sums["kl"] += float(kl.detach()) * batch_size
-        sums["rank"] += float(rank_loss.detach()) * batch_size
-        sums["rho"] += float(rho) * batch_size
-        sums["topk_recall"] += float(recall) * batch_size
+        sums["loss"] += loss.detach() * batch_size
+        sums["kl"] += kl.detach() * batch_size
+        sums["rank"] += rank_loss.detach() * batch_size
+        data_ready = time.perf_counter()
 
     elapsed = max(time.perf_counter() - start, 1e-6)
-    metrics = {key: value / max(total, 1) for key, value in sums.items()}
+    metrics = {
+        key: float(value / max(total, 1)) for key, value in sums.items()
+    }
+    metrics["rho"] = float(sums["rho"] / max(ranking_total, 1))
+    metrics["topk_recall"] = float(
+        sums["topk_recall"] / max(ranking_total, 1)
+    )
+    metrics["ranking_tiles"] = float(ranking_total)
     metrics["tiles"] = float(total)
     metrics["tiles_per_second"] = total / elapsed
+    metrics["phase_seconds"] = phase_seconds
     return metrics, global_step
 
 
@@ -205,9 +255,14 @@ def _restore_rng_state(state: dict[str, Any]) -> None:
     if state.get("numpy") is not None:
         np.random.set_state(state["numpy"])
     if state.get("torch") is not None:
-        torch.set_rng_state(state["torch"])
+        # torch.{get,set}_rng_state always deal in CPU ByteTensors, but the
+        # checkpoint may have been loaded with map_location=cuda (to place
+        # the model/optimizer tensors on-device), which also silently moves
+        # this state tensor to CUDA -- set_rng_state then rejects it. Force
+        # it back to CPU regardless of how the checkpoint was loaded.
+        torch.set_rng_state(state["torch"].cpu())
     if state.get("cuda") is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        torch.cuda.set_rng_state_all([t.cpu() for t in state["cuda"]])
 
 
 def _resume_checkpoint_payload(
@@ -309,6 +364,10 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument(
+        "--kl-weight", type=float, default=1.0,
+        help="Weight on the KL-divergence term; 0 trains on rank_loss alone",
+    )
     parser.add_argument("--rank-loss-weight", type=float, default=0.1)
     parser.add_argument("--keep-ratio-metric", type=float, default=0.1)
     parser.add_argument("--grad-accum", type=int, default=1)
@@ -346,6 +405,18 @@ def main() -> None:
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument(
+        "--train-ranking-every", type=int, default=0,
+        help="Compute train Spearman/top-k every N batches; 0 disables them (validation is always exact)",
+    )
+    parser.add_argument(
+        "--profile-json", default=None,
+        help="Write per-phase epoch timings to JSON; enables accurate CUDA synchronization",
+    )
+    parser.add_argument(
+        "--compile", action="store_true",
+        help="Compile the forecaster with torch.compile (experimental; benchmark before production use)",
+    )
     args = parser.parse_args()
 
     if (
@@ -475,6 +546,7 @@ def main() -> None:
         n_layers=args.n_layers,
         dropout=args.dropout,
     ).to(device)
+    training_forecaster = torch.compile(forecaster) if args.compile else forecaster
     optimizer = torch.optim.AdamW(
         forecaster.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
@@ -582,6 +654,8 @@ def main() -> None:
         *, resume_epoch: int, resume_skip_batches: int, step: int
     ) -> None:
         payload = _resume_checkpoint_payload(
+            # Always serialize the original module so --compile checkpoints keep
+            # the exact same state-dict keys as uncompiled and legacy runs.
             forecaster=forecaster,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -612,13 +686,14 @@ def main() -> None:
                 )
 
         train_metrics, global_step = _run_epoch(
-            forecaster=forecaster,
+            forecaster=training_forecaster,
             teacher=teacher,
             loader=train_loader,
             optimizer=optimizer,
             scaler=scaler,
             device=device,
             amp_dtype=args.amp_dtype,
+            kl_weight=args.kl_weight,
             rank_loss_weight=args.rank_loss_weight,
             keep_ratio_metric=args.keep_ratio_metric,
             grad_accum=args.grad_accum,
@@ -627,17 +702,20 @@ def main() -> None:
             global_step=global_step,
             use_wandb=use_wandb,
             cached_targets=bool(args.target_cache_index),
+            train_ranking_every=args.train_ranking_every,
+            profile=bool(args.profile_json),
             skip_batches=skip_batches,
             on_step=_on_step,
         )
         val_metrics, global_step = _run_epoch(
-            forecaster=forecaster,
+            forecaster=training_forecaster,
             teacher=teacher,
             loader=val_loader,
             optimizer=None,
             scaler=scaler,
             device=device,
             amp_dtype=args.amp_dtype,
+            kl_weight=args.kl_weight,
             rank_loss_weight=args.rank_loss_weight,
             keep_ratio_metric=args.keep_ratio_metric,
             grad_accum=1,
@@ -646,6 +724,8 @@ def main() -> None:
             global_step=global_step,
             use_wandb=use_wandb,
             cached_targets=bool(args.target_cache_index),
+            train_ranking_every=0,
+            profile=bool(args.profile_json),
         )
         scheduler.step()
         row = {
@@ -673,8 +753,16 @@ def main() -> None:
         if use_wandb:
             log = {
                 "epoch": epoch + 1,
-                **{f"train/{key}": value for key, value in train_metrics.items()},
-                **{f"val/{key}": value for key, value in val_metrics.items()},
+                **{
+                    f"train/{key}": value
+                    for key, value in train_metrics.items()
+                    if key != "phase_seconds"
+                },
+                **{
+                    f"val/{key}": value
+                    for key, value in val_metrics.items()
+                    if key != "phase_seconds"
+                },
                 "optimizer/lr": scheduler.get_last_lr()[0],
                 "sampling/unique_wsi": train_sampler.last_summary.get("unique_slides", 0),
                 "sampling/scheduled_tiles": train_sampler.last_summary.get("scheduled_tiles", 0),
@@ -685,6 +773,11 @@ def main() -> None:
                 "cohort_counts", {}
             ).items():
                 log[f"sampling/cohort/{cohort}"] = count
+            if args.profile_json:
+                for phase, seconds in train_metrics["phase_seconds"].items():
+                    log[f"profile/train/{phase}_seconds"] = seconds
+                for phase, seconds in val_metrics["phase_seconds"].items():
+                    log[f"profile/val/{phase}_seconds"] = seconds
             if torch.cuda.is_available():
                 log["system/max_cuda_memory_gib"] = torch.cuda.max_memory_allocated() / 2**30
             wandb.log(log, step=global_step)
@@ -716,6 +809,28 @@ def main() -> None:
     (output_dir / f"summary_{run_name}.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
+    if args.profile_json:
+        profile_path = Path(args.profile_json).expanduser().resolve()
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "run_name": run_name,
+                    "epochs": [
+                        {
+                            "epoch": row["epoch"],
+                            "train_tiles_per_second": row["train"]["tiles_per_second"],
+                            "val_tiles_per_second": row["val"]["tiles_per_second"],
+                            "train_phase_seconds": row["train"]["phase_seconds"],
+                            "val_phase_seconds": row["val"]["phase_seconds"],
+                        }
+                        for row in history
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     if use_wandb:
         wandb.summary["best_val_kl"] = best_val
         wandb.summary["checkpoint"] = str(checkpoint_path)

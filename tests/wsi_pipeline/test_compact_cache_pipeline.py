@@ -133,6 +133,55 @@ def test_online_teacher_extract_early_skips_later_blocks() -> None:
     assert [block.calls for block in backbone.blocks] == [1, 1, 0]
 
 
+def test_online_teacher_uses_explicit_timm_early_forward() -> None:
+    torch = pytest.importorskip("torch")
+
+    class Block(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, value):
+            self.calls += 1
+            return value + 1
+
+    class Identity(torch.nn.Module):
+        def forward(self, value):
+            return value
+
+    class Backbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.patch_embed = Identity()
+            self.patch_drop = Identity()
+            self.norm_pre = Identity()
+            self.blocks = torch.nn.ModuleList([Block(), Block(), Block()])
+
+        def _pos_embed(self, value):
+            return value
+
+        def forward_features(self, _value):
+            raise AssertionError("explicit early path must bypass full forward_features")
+
+    class Adapter:
+        num_prefix_tokens = 1
+        n_blocks = 3
+
+        def __init__(self, model):
+            self.model = model
+
+        def get_blocks(self):
+            return self.model.blocks
+
+    backbone = Backbone()
+    teacher = OnlineAttentionTeacher(backbone, Adapter(backbone), 1, 2)
+
+    source = teacher.extract_early(torch.zeros(2, 5, 3))
+
+    assert source.shape == (2, 4, 3)
+    assert [block.calls for block in backbone.blocks] == [1, 1, 0]
+
+
 def test_target_attention_matches_full_matrix_reference() -> None:
     """CLS-row optimization must preserve today's full-[B,H,N,N]-matrix result."""
     torch = pytest.importorskip("torch")

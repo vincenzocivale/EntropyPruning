@@ -261,3 +261,64 @@ def test_sampler_batches_and_rotating_wsi_coverage() -> None:
     # Equal cohorts and a 50% per-epoch budget should cover every slide after
     # two deterministic rotations, not repeatedly redraw the same small subset.
     assert len(epoch_slide_sets[0] | epoch_slide_sets[1]) == 16
+
+
+def test_sampler_does_not_pad_non_divisible_tile_budget() -> None:
+    records = [_record(index, "A") for index in range(4)]
+    sampler = WSIBalancedBatchSampler(
+        records,
+        batch_size=16,
+        slides_per_batch=4,
+        slides_per_epoch=4,
+        tiles_per_slide=5,
+        seed=3,
+    )
+
+    batches = list(sampler)
+
+    assert [len(batch) for batch in batches] == [16, 4]
+    counts = {}
+    for batch in batches:
+        for slide_index, _ in batch:
+            counts[slide_index] = counts.get(slide_index, 0) + 1
+    assert counts == {0: 5, 1: 5, 2: 5, 3: 5}
+    assert sampler.last_summary["scheduled_tiles"] == 20
+
+
+def test_dataset_batched_reads_restore_sampler_order(tmp_path: Path, monkeypatch) -> None:
+    coords_path = tmp_path / "coords.h5"
+    with h5py.File(coords_path, "w") as handle:
+        handle.create_dataset(
+            "coords", data=np.asarray([[300, 0], [100, 0], [200, 0]], dtype=np.int64)
+        )
+    read_locations = []
+
+    class FakeSlide:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def read_region(self, location, _level, size):
+            read_locations.append(location)
+            return Image.new("RGBA", size, (location[0] % 255, 0, 0, 255))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openslide",
+        type("FakeOpenSlideModule", (), {"OpenSlide": FakeSlide})(),
+    )
+    record = SlideRecord(
+        slide_id="slide", case_id="case", cohort="A",
+        raw_path=tmp_path / "slide.svs", coords_path=coords_path, split="train",
+        coord_count=3, patch_level=0, patch_size=8, coordinate_window_size=8,
+    )
+    dataset = WSITileDataset(
+        [record], transform=lambda image: image.getpixel((0, 0))[0], augment=False
+    )
+
+    result = dataset.__getitems__([(0, 0), (0, 1), (0, 2)])
+
+    assert read_locations == [(100, 0), (200, 0), (300, 0)]
+    assert [value for value, _ in result] == [300 % 255, 100, 200]

@@ -428,6 +428,36 @@ class WSITileDataset(Dataset):
         image = self.transform(tile) if self.transform is not None else tile
         return image, int(slide_index)
 
+    def __getitems__(
+        self, indices: list[tuple[int, int]]
+    ) -> list[tuple[torch.Tensor, int]]:
+        """Read a batch in spatial order, then restore sampler order.
+
+        Nearby coordinates commonly share one compressed TIFF tile.  Sorting only
+        inside the batch improves OpenSlide decoded-block reuse without changing the
+        order observed by collation, the optimizer, or cached supervision.
+        """
+        if len(indices) < 2:
+            return [self[index] for index in indices]
+
+        decorated: list[tuple[int, int, int, tuple[int, int]]] = []
+        coords_by_slide: dict[int, np.ndarray] = {}
+        for position, raw_index in enumerate(indices):
+            slide_index, coord_index = (int(raw_index[0]), int(raw_index[1]))
+            if slide_index not in coords_by_slide:
+                coords_by_slide[slide_index] = self._get_coords(
+                    self.records[slide_index].coords_path
+                )
+            x, y = coords_by_slide[slide_index][coord_index, :2]
+            decorated.append(
+                (slide_index, int(y), int(x), (slide_index, coord_index))
+            )
+        read_order = sorted(range(len(indices)), key=decorated.__getitem__)
+        restored: list[tuple[torch.Tensor, int] | None] = [None] * len(indices)
+        for position in read_order:
+            restored[position] = self[decorated[position][3]]
+        return [item for item in restored if item is not None]
+
 
 class WSIBalancedBatchSampler(Sampler[list[tuple[int, int]]]):
     """Coverage-aware cohort-balanced WSI/tile batch sampler.
@@ -584,10 +614,11 @@ class WSIBalancedBatchSampler(Sampler[list[tuple[int, int]]]):
                     coords = sampled[slide_index]
                     begin = round_index * chunk
                     values = coords[begin : begin + chunk]
-                    if len(values) < chunk:
-                        values = values + coords[: chunk - len(values)]
                     batch.extend((slide_index, coord_index) for coord_index in values)
-                if len(batch) == self.batch_size or not self.drop_last:
+                # The final round may be smaller when tiles_per_slide is not a
+                # multiple of batch_size/slides_per_batch.  Yield it rather than
+                # silently repeating coordinates (e.g. 500 used to become 504).
+                if batch:
                     yield batch
 
     def __len__(self) -> int:
