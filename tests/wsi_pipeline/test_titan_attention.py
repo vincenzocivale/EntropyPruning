@@ -53,7 +53,7 @@ class FakeVisionModel(nn.Module):
         return x[:, 0]
 
 
-def _run_capture(attention_type: type[nn.Module]):
+def _run_capture(attention_type: type[nn.Module], *, hidden_layers: tuple[int, ...] = ()):
     torch.manual_seed(3)
     model = FakeVisionModel(attention_type).eval()
     features = torch.randn(5, 8)
@@ -69,6 +69,7 @@ def _run_capture(attention_type: type[nn.Module]):
             modes=("global_to_tokens", "received", "rollout", "full"),
             full_layers=(-1,),
             max_full_attention_tokens=32,
+            hidden_layers=hidden_layers,
         ),
     )
     return embedding, result
@@ -92,6 +93,32 @@ def test_captures_sdpa_attention_from_real_qk() -> None:
     assert "sdpa_qk_exact" in result.metadata["attention_capture_backends"]
     full = result.attention["full_layer_001"].float()
     torch.testing.assert_close(full.sum(dim=-1), torch.ones_like(full.sum(dim=-1)), atol=2e-3, rtol=2e-3)
+
+
+def test_captures_intermediate_hidden_layer_aligned_to_tiles() -> None:
+    _, result = _run_capture(ExplicitAttention, hidden_layers=(0,))
+    assert "hidden_layer_000" in result.auxiliary
+    hidden = result.auxiliary["hidden_layer_000"]
+    # 5 tiles, block-0 output dim 8 (FakeVisionModel's attn_blocks[0] output), gathered
+    # via the same tile_to_token mapping used for the attention values (CLS stripped).
+    assert hidden.shape == (5, 8)
+    assert torch.isfinite(hidden.float()).all()
+
+
+def test_hidden_layer_negative_index_matches_last_block() -> None:
+    _, result_pos = _run_capture(ExplicitAttention, hidden_layers=(1,))
+    _, result_neg = _run_capture(ExplicitAttention, hidden_layers=(-1,))
+    torch.testing.assert_close(
+        result_pos.auxiliary["hidden_layer_001"].float(),
+        result_neg.auxiliary["hidden_layer_001"].float(),
+    )
+
+
+def test_hidden_layer_out_of_range_raises() -> None:
+    import pytest
+
+    with pytest.raises(IndexError):
+        _run_capture(ExplicitAttention, hidden_layers=(5,))
 
 
 def test_dense_grid_mapping_is_validated_against_token_count() -> None:

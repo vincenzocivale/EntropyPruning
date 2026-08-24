@@ -135,6 +135,65 @@ BENCHMARK_RULES = [
             "Reserved external/OOD lung pathology collections."
         ),
     },
+    {
+        "benchmark_id": "wsi_tcga_crc",
+        "benchmark_level": "wsi",
+        "source_family": "TCGA",
+        "blocked_collection": "tcga_coad|tcga_read",
+        "exclusion_scope": "entire_collection",
+        "reason": (
+            "EAGLE-parity WSI CRC benchmark, TCGA arm "
+            "(arXiv:2502.13027)."
+        ),
+    },
+    {
+        "benchmark_id": "wsi_crc_external",
+        "benchmark_level": "wsi",
+        "source_family": "CPTAC",
+        "blocked_collection": "cptac_coad",
+        "exclusion_scope": "entire_collection",
+        "reason": (
+            "EAGLE-parity external WSI CRC benchmark, CPTAC arm. "
+            "DACHS (paper's third CRC arm, n=3604) is a private "
+            "DKFZ cohort and is not reproduced here."
+        ),
+    },
+    {
+        "benchmark_id": "wsi_tcga_brca",
+        "benchmark_level": "wsi",
+        "source_family": "TCGA",
+        "blocked_collection": "tcga_brca",
+        "exclusion_scope": "entire_collection",
+        "reason": (
+            "EAGLE-parity WSI BRCA benchmark, TCGA arm "
+            "(arXiv:2502.13027)."
+        ),
+    },
+    {
+        "benchmark_id": "wsi_brca_external",
+        "benchmark_level": "wsi",
+        "source_family": "CPTAC",
+        "blocked_collection": "cptac_brca",
+        "exclusion_scope": "entire_collection",
+        "reason": (
+            "EAGLE-parity external WSI BRCA benchmark, CPTAC arm. "
+            "IEO Milan (paper's third BRCA arm, n=451) is a "
+            "private cohort and is not reproduced here."
+        ),
+    },
+    {
+        "benchmark_id": "wsi_tcga_stad",
+        "benchmark_level": "wsi",
+        "source_family": "TCGA",
+        "blocked_collection": "tcga_stad",
+        "exclusion_scope": "entire_collection",
+        "reason": (
+            "EAGLE-parity WSI STAD benchmark, TCGA arm "
+            "(arXiv:2502.13027). No public external STAD arm "
+            "exists; the paper's Bern/Kiel cohorts are private "
+            "and are not reproduced here."
+        ),
+    },
 ]
 
 

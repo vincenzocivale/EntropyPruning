@@ -30,6 +30,7 @@ class TitanAdapter(WSIModelAdapter):
         max_full_attention_tokens: int = 2048,
         max_rollout_tokens: int = 4096,
         strict_attention_capture: bool = True,
+        hidden_layers: tuple[int, ...] = (),
         revision: str | None = None,
     ) -> None:
         from transformers import AutoModel
@@ -47,6 +48,7 @@ class TitanAdapter(WSIModelAdapter):
             max_full_attention_tokens=max_full_attention_tokens,
             max_rollout_tokens=max_rollout_tokens,
             strict=strict_attention_capture,
+            hidden_layers=hidden_layers,
         )
 
     def to(self, device: torch.device) -> "TitanAdapter":

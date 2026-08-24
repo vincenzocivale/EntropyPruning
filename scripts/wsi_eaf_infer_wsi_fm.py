@@ -175,6 +175,17 @@ def main() -> int:
     parser.add_argument("--titan-max-full-attention-tokens", type=int, default=2048)
     parser.add_argument("--titan-max-rollout-tokens", type=int, default=4096)
     parser.add_argument("--titan-revision")
+    parser.add_argument(
+        "--titan-hidden-layer", action="append", type=int,
+        help=(
+            "Repeat to also capture the residual-stream output of TITAN's own vision-encoder "
+            "block(s) at this 0-based index (negative indices supported, same convention as "
+            "--titan-full-layer). Written as auxiliary/hidden_layer_{layer:03d}, already mapped "
+            "to input-tile order -- the input for a WSI-EAF forecaster that predicts final-layer "
+            "attention from TITAN's own intermediate representation instead of from the tile "
+            "encoder's context-free output. See src/models/wsi/dense_forecaster.py."
+        ),
+    )
     args = parser.parse_args()
 
     paths = sorted(p for p in args.tile_cache_dir.glob("*.h5"))
@@ -196,6 +207,7 @@ def main() -> int:
             full_attention_layers=full_layers,
             max_full_attention_tokens=args.titan_max_full_attention_tokens,
             max_rollout_tokens=args.titan_max_rollout_tokens,
+            hidden_layers=tuple(args.titan_hidden_layer or ()),
             revision=args.titan_revision,
         )
 

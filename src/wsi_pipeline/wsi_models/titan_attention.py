@@ -27,6 +27,15 @@ class TitanAttentionCaptureConfig:
     max_full_attention_tokens: int = 2048
     max_rollout_tokens: int = 4096
     strict: bool = True
+    # Block indices (0-based, negative-indexing supported, same convention as
+    # ``full_layers``/``target_layer`` elsewhere in this module) whose *residual-
+    # stream output* (after that block's own self-attention AND MLP, i.e. exactly
+    # what gets handed to the next block) should also be captured and mapped back
+    # to input-tile order. This is the "intermediate WSI-FM representation" input
+    # for a WSI-EAF forecaster that predicts final-layer attention from TITAN's own
+    # partial forward, instead of from the tile encoder's context-free output -- see
+    # ``src/models/wsi/dense_forecaster.py`` and ``docs/offline_eaf_pipeline.md``.
+    hidden_layers: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         allowed = {"global_to_tokens", "received", "rollout", "full"}
@@ -56,6 +65,33 @@ class TitanAttentionResult:
     metadata: Mapping[str, Any]
 
 
+def _find_block_list(model: nn.Module) -> nn.ModuleList:
+    """Locate the model's transformer block list for hidden-layer capture.
+
+    Real TITAN nests its 6 ViT blocks at ``vision_encoder.blocks.modules_list``
+    (``CustomSequential.modules_list``, see the cached ``vision_transformer.py``);
+    test doubles in this repo use a flatter ``some_name = nn.ModuleList([...])``
+    (e.g. ``attn_blocks``). Both are matched by looking for any named
+    ``nn.ModuleList`` whose attribute name ends in a known "blocks" alias,
+    preferring the most deeply-nested match so a real TITAN model's
+    ``vision_encoder.blocks.modules_list`` wins over any shallower container
+    that happens to share a name.
+    """
+    aliases = {"blocks", "modules_list", "attn_blocks", "layers", "layer"}
+    candidates = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, nn.ModuleList) and name.rsplit(".", 1)[-1] in aliases
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "Could not locate a transformer block list for hidden-layer capture "
+            f"(no nn.ModuleList named one of {sorted(aliases)} found)"
+        )
+    candidates.sort(key=lambda item: len(item[0]), reverse=True)
+    return candidates[0][1]
+
+
 class _RuntimeAttentionCapture:
     """Scoped capture of post-softmax attention used by the live TITAN model.
 
@@ -72,6 +108,7 @@ class _RuntimeAttentionCapture:
         self.model = model
         self.config = config
         self.records: list[_CapturedAttention] = []
+        self.hidden_states: dict[int, torch.Tensor] = {}
         self._handles: list[Any] = []
         self._local = threading.local()
         self._orig_sdpa = F.scaled_dot_product_attention
@@ -118,6 +155,21 @@ class _RuntimeAttentionCapture:
                 stack.pop()
             elif name in stack:
                 stack.remove(name)
+
+        return hook
+
+    def _hidden_hook(self, layer: int) -> Callable:
+        def hook(_module: nn.Module, _inputs: tuple[Any, ...], output: Any) -> None:
+            tensor = output[0] if isinstance(output, (tuple, list)) else output
+            if not torch.is_tensor(tensor):
+                raise TypeError(
+                    f"Block {layer} returned unsupported type {type(tensor)!r} for hidden-layer capture"
+                )
+            if not torch.isfinite(tensor).all():
+                raise RuntimeError(f"Captured TITAN hidden layer {layer} contains NaN/Inf")
+            # Kept in fp32/CPU immediately: this is a per-tile [1,T,C] residual-stream
+            # snapshot, not something later math needs on-device for this same forward.
+            self.hidden_states[layer] = tensor.detach().to("cpu", dtype=torch.float32)
 
         return hook
 
@@ -307,6 +359,15 @@ class _RuntimeAttentionCapture:
             except TypeError:  # PyTorch versions before always_call support.
                 handle = module.register_forward_hook(self._post_hook(name))
             self._handles.append(handle)
+
+        if self.config.hidden_layers:
+            block_list = _find_block_list(self.model)
+            n_blocks = len(block_list)
+            for raw_layer in self.config.hidden_layers:
+                layer = raw_layer + n_blocks if raw_layer < 0 else raw_layer
+                if not 0 <= layer < n_blocks:
+                    raise IndexError(f"hidden_layers entry {raw_layer} out of range for {n_blocks} blocks")
+                self._handles.append(block_list[layer].register_forward_hook(self._hidden_hook(layer)))
 
         capture = self
 
@@ -574,5 +635,28 @@ def capture_titan_attention(
             attention["rollout_global_to_tiles_mass_share"] = _map_token_values_to_tiles(
                 token_values, tile_to_token, mass_share=True
             )
+
+    if config.hidden_layers:
+        n_blocks = len(capture.records)
+        for raw_layer in config.hidden_layers:
+            layer = raw_layer + n_blocks if raw_layer < 0 else raw_layer
+            if layer not in capture.hidden_states:
+                raise RuntimeError(
+                    f"TITAN hidden-layer capture requested layer {raw_layer} (normalized {layer}) "
+                    f"but it was never captured; available={sorted(capture.hidden_states)}"
+                )
+            if tile_to_token is None:
+                raise RuntimeError(
+                    f"Cannot align hidden-layer {layer} to input tiles: tile_to_token mapping "
+                    f"unavailable ({mapping_metadata.get('tile_token_mapping')})"
+                )
+            # hidden_states[layer] is [1, key_tokens, C] in TITAN's own internal token
+            # order (CLS at index 0). tile_to_token already indexes past that CLS
+            # prefix (see infer_titan_tile_to_token), so this is a direct gather back
+            # to input-tile order -- no broadcast/mass-share reduction needed, unlike
+            # the attention values above: this is a per-tile feature vector, not a
+            # probability mass split across tiles that share one TITAN token.
+            hidden = capture.hidden_states[layer][0]
+            auxiliary[f"hidden_layer_{layer:03d}"] = hidden[tile_to_token].to(torch.float16)
 
     return embedding, TitanAttentionResult(attention, auxiliary, metadata)

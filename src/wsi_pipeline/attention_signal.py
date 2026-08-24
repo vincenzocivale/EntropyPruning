@@ -418,6 +418,11 @@ def compute_context_descriptors(
     coords = np.asarray(coords, dtype=np.float32)
     indices = np.asarray(indices, dtype=np.int64)
     normalized = _normalize_rows(values)
+    mean_direction = normalized.mean(axis=0)
+    mean_direction_norm = float(np.linalg.norm(mean_direction))
+    if mean_direction_norm > 1e-8:
+        mean_direction = mean_direction / mean_direction_norm
+    mean_similarity = normalized[indices] @ mean_direction
     centers, prevalence = _fit_slide_prototypes(values, n_prototypes, max_fit_tiles, seed)
     similarities = normalized[indices] @ centers.T
     order = np.argsort(similarities, axis=1)
@@ -446,6 +451,7 @@ def compute_context_descriptors(
     boundary = np.min(np.column_stack([xy_norm, 1.0 - xy_norm]), axis=1)
 
     descriptors = [
+        mean_similarity,
         top1,
         top1 - top2,
         assigned_prevalence,
