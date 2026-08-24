@@ -21,6 +21,89 @@ non è coperta da questo documento.
   non dipende dal source layer (solo `final_attention`/`tile_embeddings`); una sola
   cache per encoder serve qualunque `--source-layer` (vedi fix 2026-08-24 in
   `train_wsi_tile_eaf_online.py`).
+- **Nota naming nota**: `titan_src01`, `titan_src02_pruned{30,20,10}pct` (run lanciati
+  il 2026-08-24 prima del fix successivo) usano ancora il `--model-name` THUNDER grezzo
+  (`titan`) invece del tile-encoder risolto (`conch_v15`) nel nome del run/file —
+  vivono comunque correttamente sotto `checkpoints/.../conch_v15/`. Corretto per i
+  run successivi (`conch_v15_src00`, `conch_v15_src03`, ecc.); non rinominato in corsa
+  per non rompere i path di checkpoint di job già in esecuzione.
+
+## Dati utilizzati
+
+### Stage 1 (forecaster) e Stage 2 (pruning distillation)
+
+Stessa cache/manifest per entrambi gli stage — la distillazione Stage 2 legge
+`tile_embeddings` dalla stessa cache compatta usata per addestrare il forecaster.
+
+- **Manifest**: `$EAF_WSI_ROOT/datasets/pretraining/histai_eaf_wsi_v1/manifests/conch_v15_complete_v1/slides.csv`
+  — **5495 slide, solo HISTAI** (colonna `source`=`histai` al 100%), 7 dei 9
+  sotto-set (`HISTAI-mixed` e `HISTAI-skin-b2` assenti — non ancora scaricati al
+  momento della costruzione della cache):
+
+  | Sotto-set | Slide |
+  |---|---|
+  | HISTAI-skin-b1 | 1763 |
+  | HISTAI-breast | 1687 |
+  | HISTAI-colorectal-b1 | 996 |
+  | HISTAI-thorax | 653 |
+  | HISTAI-hematologic | 214 |
+  | HISTAI-gastrointestinal | 120 |
+  | HISTAI-colorectal-b2 | 62 |
+
+  **Nota importante**: questo NON è il corpus "strict" HISTAI+GTEx+HEST
+  (`eaf_wsi_pretrain_strict_v1`) descritto come corpus canonico di pretraining EAF
+  in CLAUDE.md/`docs/data_layout.md`. `hest_eaf_thunder_clean_v1` esiste su disco
+  ma non è ancora stato passato tramite `eaf.py cache-tile` per CONCH v1.5; GTEx non
+  è scaricato in questo ambiente. Il tile-EAF (a differenza del WSI-EAF) sta quindi
+  girando su un corpus più ristretto di quello canonico — espandere a HEST/GTEx è
+  lavoro futuro, non bloccante per lo sweep del source layer.
+- **Cache**: `$EAF_WSI_ROOT/datasets/pretraining/histai_eaf_wsi_v1/manifests/conch_v15_complete_v1/tile_cache_index.csv`
+  (compatta, `coords`/`final_attention`/`tile_embeddings`, indipendente dal source
+  layer — vedi nota sopra).
+- **Split**: nessuno split pre-assegnato nel manifest (colonna `split` vuota) —
+  calcolato a runtime da `load_wsi_manifest` con `--val-fraction 0.1
+  --split-seed 42` (deterministico), `--slide-group diagnostic`.
+- **Campionamento**: `--tiles-per-wsi 500`, `--batch-size 64-128`, bilanciamento
+  per cohort (`--cohort-balance-power 0.5`).
+
+### Stage 3 (linear probing pruned vs baseline)
+
+- **Base data folder**: `$THUNDER_BASE_DATA_FOLDER` (`/data2/home/vcivale/projects/imaging/data/thunder-tiles/`),
+  scoperto automaticamente da `ThunderDatasetRegistry` via `datasets/data_splits/*.json`
+  — nessun elenco curato nel codice.
+- **Dataset effettivamente presenti in questo ambiente** (15, verificato 2026-08-24):
+  `bach`, `bracs`, `break_his`, `ccrcc`, `crc`, `esca`, `patch_camelyon`,
+  `spider_breast`, `spider_colorectal`, `spider_skin`, `spider_thorax`,
+  `tcga_crc_msi`, `tcga_tils`, `tcga_uniform`, `wilds`. Il registro THUNDER ne
+  supporta altri (es. `mhist`, `ocelot`, `pannuke`, `segpath_epithelial`,
+  `segpath_lymphocytes`) ma non sono materializzati qui — se scaricati, verrebbero
+  inclusi automaticamente senza modifiche al codice.
+- **Split**: gestito da `ThunderDatasetRegistry`/`build_multi_thunder_train_loaders`
+  a partire da `data_splits/*.json`; `--n-holdout 0` per usare tutti i dataset
+  (nessun holdout) nel confronto pruned-vs-baseline.
+
+## Note operative (GPU condivisa)
+
+Lezioni dall'incidente del 2026-08-24 (lanciando 4 job concorrenti tramite MPS,
+vedi Fase 1/2 sotto), utili per ogni lancio futuro su questa macchina:
+
+- **Sempre `--num-workers 16 --slide-cache-size 20`** con `--slides-per-batch 16`
+  (il default dello script, `--num-workers 8 --slide-cache-size 4`, causa un pattern
+  a raffica-poi-stallo: con `slide-cache-size` troppo piccolo rispetto a
+  `slides-per-batch`, quasi ogni WSI del gruppo va riaperta da zero ad ogni batch).
+- **MPS**: su GPU condivisa con altri processi, lanciare sempre con
+  `CUDA_MPS_PIPE_DIRECTORY=/data2/home/vcivale/mps/pipe
+  CUDA_MPS_LOG_DIRECTORY=/data2/home/vcivale/mps/log` (demone MPS già attivo sulla
+  macchina) — altrimenti si gira in context-switching non-MPS, peggiorando ulteriormente
+  il pattern raffica-stallo.
+- **Concorrenza GPU reale ≈ 2 job**, non di più, anche con MPS: un job pruning
+  (Stage 2, `--keep-ratio` qualunque) può stabilizzarsi ovunque tra ~2GB e ~19GB a
+  seconda del traffico/allocator (osservato: un run keep20% consolidato a 19.4GB,
+  ben oltre gli altri due). Su 40GB totali, con un altro processo utente da ~4GB
+  quasi sempre presente, un terzo job concorrente rischia OOM concreto (successo 2
+  volte su 2 tentativi il 2026-08-24). Per lanci multipli, preferire sequenziale con
+  un controllo di margine GPU reale (`nvidia-smi --query-gpu=memory.used`), non un
+  numero fisso di job.
 
 ## Fase 0 — Smoke test del refactor multi-encoder
 
@@ -57,13 +140,22 @@ compatta è indipendente dal source layer, riutilizzabile senza rebuild). Confro
 finale su rho/KL **e** costo computazionale del pruning a quel layer — non vince
 semplicemente la metrica di fit più alta.
 
+**Stato (2026-08-24)**: `titan_src01` (source layer 1) in corso — vedi nota naming
+sopra sul perché si chiama `titan_src01` e non `conch_v15_src01`.
+`conch_v15_src00` non ancora lanciato (in attesa dell'esito di src01).
+
 ## Fase 2 — Stage 2 (pruning distillation), sul layer vincente
 
-Una volta scelto il source layer migliore per CONCH v1.5, ri-addestrare Stage 2 ai
-tre keep-ratio (30/20/10%) con un budget di epoche coerente e verificato-completo
-(i checkpoint precedenti sono stati eliminati: uno senza summary/epoche non
-verificabili, gli altri due fermati a 5/20 epoche pianificate — budget incoerente per
-un confronto valido).
+Lanciata in anticipo sul layer 2 (in parallelo allo sweep Fase 1, non atteso l'esito)
+per validare da subito lo Stage 3 — vedi Fase 3. Tre keep-ratio (30/20/10%), stesso
+budget di epoche coerente e verificato-completo per tutti (i checkpoint precedenti
+erano stati eliminati: uno senza summary/epoche non verificabili, gli altri due
+fermati a 5/20 epoche pianificate — budget incoerente per un confronto valido).
+
+**Stato (2026-08-24)**: `titan_src02_pruned20pct` in corso. `titan_src02_pruned30pct`
+e `titan_src02_pruned10pct` in coda (script `queue_pruning_runs.sh`, non nel repo —
+scratch di sessione), in attesa di margine GPU reale prima di partire in sequenza —
+vedi "Note operative" sopra sul perché non tutti e 4 i run insieme.
 
 ## Fase 3 — Stage 3 (linear probing, tutti i dataset THUNDER)
 

@@ -210,14 +210,22 @@ in conflict, they cover different corpus scales:
   `caches/` convention below):
 
   ```text
-  checkpoints/tile_eaf/<tile_encoder>/
+  checkpoints/tile_eaf/<tile_encoder>/<run>/
     best_<run>.pt
     summary_<run>.json
 
-  checkpoints/pruned_finetuned/<tile_encoder>/
+  checkpoints/pruned_finetuned/<tile_encoder>/<run>/
     best_<run>_adapter.pt       # trainable LoRA tensors only
     summary_<run>.json
   ```
+
+  One subdirectory per run (not files disambiguated only by filename suffix in a
+  flat per-encoder directory) — see `docs/tile_eaf_experiment_roadmap.md` for the
+  naming convention and why (2026-08-24: a flat layout across a hyperparameter
+  search left 5 same-encoder/same-source-layer checkpoints impossible to tell
+  apart from filenames alone). `<tile_encoder>` is the actual tile encoder loaded
+  (e.g. `conch_v15`), not necessarily the THUNDER `--model-name` used to load it
+  (`titan` -> `conch_v15`; see `src/utils.py::tile_encoder_dir_name`).
 
   A future `checkpoints/wsi_eaf/<tile_encoder>__<wsi_encoder>/` namespace is
   reserved for slide-level (MIL) EAF forecaster checkpoints once that training

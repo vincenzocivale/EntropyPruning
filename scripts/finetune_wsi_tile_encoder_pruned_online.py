@@ -376,7 +376,8 @@ def main() -> None:
     # train_wsi_tile_eaf_online.py (prune_layer plays the role of source_layer
     # here), plus the keep-ratio that distinguishes the 30/20/10% variants.
     run_name = args.run_name or (
-        f"{args.model_name}_src{args.prune_layer:02d}_pruned{int(round(args.keep_ratio * 100))}pct"
+        f"{tile_encoder_dir_name(args.model_name)}_src{args.prune_layer:02d}"
+        f"_pruned{int(round(args.keep_ratio * 100))}pct"
     )
     output_dir = (
         Path(args.output_dir).expanduser().resolve()

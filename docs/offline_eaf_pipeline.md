@@ -42,6 +42,17 @@ against — without first pointing training at an alternative pixel source — w
 it; this is a real, load-bearing dependency introduced by moving `early_tokens` out of
 the permanent cache, not a slip to overlook.
 
+**Encoder support (2026-08-24).** `--encoder conch_v15` uses TITAN's `return_conch()`
+accessor; any other name (`uni2h`, `virchow2`, `hoptimus1`, `provgigapath`, ...) is
+loaded through THUNDER's model registry
+(`HookedViTTileTeacherAdapter.from_thunder_model`), the same path
+`scripts/train_wsi_tile_eaf_online.py`/`finetune_wsi_tile_encoder_pruned_online.py`
+already use for `--model-name`. The cache never depends on `early_layer`/source layer
+(`cache_id` excludes it, see `cache_contracts.py`), so one cache per encoder covers
+every `--source-layer` sweep without rebuilding — see
+`docs/tile_eaf_experiment_roadmap.md` for the current experiment plan and which
+corpus/datasets back each stage.
+
 `HookedViTTileTeacherAdapter.extract_final(images)` is the offline, cache-building
 counterpart: one full forward, only `final_attention` + `tile_embeddings`, no
 `early_tokens` hook installed at all (so building the cache doesn't even pay the small

@@ -572,7 +572,7 @@ def main() -> None:
     # Run names are just <tile-encoder>_src<NN> -- every other hyperparameter
     # (target layer, tiles-per-wsi, lr, cache mode, ...) is still fully captured
     # in wandb.config below, it just no longer bloats the display name.
-    run_name = args.run_name or f"{args.model_name}_src{args.source_layer:02d}"
+    run_name = args.run_name or f"{tile_encoder_dir_name(args.model_name)}_src{args.source_layer:02d}"
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
