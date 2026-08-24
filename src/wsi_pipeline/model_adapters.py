@@ -226,6 +226,49 @@ class HookedViTTileTeacherAdapter:
             input_size=input_size,
         )
 
+    @classmethod
+    def from_thunder_model(
+        cls,
+        model_name: str,
+        *,
+        revision: str = "unknown",
+        device: Any = None,
+    ) -> "HookedViTTileTeacherAdapter":
+        """Load any timm-style encoder from THUNDER's model registry (UNI2-h,
+        Virchow2, H-Optimus-1, Prov-GigaPath, and any future addition -- anything
+        ``thunder.models.pretrained_models.get_model_from_name`` knows about).
+
+        Mirrors exactly how the online trainer/pruner load a teacher
+        (``ThunderBackboneAdapter`` wrapping the same ``get_model_from_name`` call in
+        ``scripts/train_wsi_tile_eaf_online.py`` /
+        ``scripts/finetune_wsi_tile_encoder_pruned_online.py``), so the offline cache
+        and the online training code always agree on which weights back a given
+        ``--encoder``/``--model-name`` value. CONCH v1.5 keeps its dedicated
+        ``from_conch()`` accessor (TITAN's ``return_conch()``, numerically validated
+        separately against the online teacher); this covers every other encoder.
+
+        Block/prefix-token discovery is identical to ``from_conch``/``from_timm``
+        (``find_transformer_blocks``/``resolve_num_prefix_tokens``): any encoder whose
+        attention module doesn't expose the standard timm ``qkv``/``scale`` interface
+        raises immediately from ``extract_final``/``extract_early`` rather than
+        silently capturing the wrong tensor -- e.g. HuggingFace-native models such as
+        phikon/hibou are not supported by this path (same limitation as
+        ``ThunderBackboneAdapter``).
+        """
+        from thunder.models.pretrained_models import get_model_from_name
+
+        device_str = str(device) if device is not None else "cpu"
+        model, transform, _ = get_model_from_name(model_name, device_str)
+        input_size = _infer_crop_size(transform, default=224)
+        return cls(
+            model,
+            name=model_name,
+            revision=revision,
+            device=device,
+            transform=transform,
+            input_size=input_size,
+        )
+
     def _make_final_attn_hook(self, cache: dict[str, Any], final_layer: int):
         """Capture only the CLS attention row without replacing model attention.
 

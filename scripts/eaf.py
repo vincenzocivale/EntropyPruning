@@ -434,7 +434,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV: slide_id,path (required with --slides; TRIDENT *_patches.h5)",
     )
     p.add_argument("--output-dir", type=Path, required=True)
-    p.add_argument("--encoder", choices=("conch_v15",), default="conch_v15")
+    p.add_argument(
+        "--encoder", default="conch_v15",
+        help=(
+            "Tile encoder to cache. 'conch_v15' uses TITAN's return_conch() accessor; "
+            "any other name (e.g. uni2h, virchow2, hoptimus1, provgigapath) is loaded "
+            "via THUNDER's model registry (thunder.models.pretrained_models."
+            "get_model_from_name), the same path scripts/train_wsi_tile_eaf_online.py "
+            "and finetune_wsi_tile_encoder_pruned_online.py use for --model-name."
+        ),
+    )
     p.add_argument(
         "--early-layer", type=int, default=2,
         help="0-based transformer block index; value = that block's OUTPUT (post-residual). See TileCacheSpec.early_layer_semantics.",

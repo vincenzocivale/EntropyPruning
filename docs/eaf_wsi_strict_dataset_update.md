@@ -1,11 +1,10 @@
 # EAF-WSI strict pretraining dataset update
 
-> **Preferred entry point:** `python scripts/eaf.py data ...` (see AGENTS.md
-> "Operational entry point"). `scripts/wsi_prepare_strict_pretraining.py` is
-> kept only as a thin, deprecated compatibility wrapper around the same
-> `src/data/wsi/corpora.py` functions — both call the same one
-> HISTAI/GTEx/HEST planner. The commands below still work through either
-> entry point; `eaf.py` equivalents are noted per step.
+> **Entry point:** `python scripts/eaf.py data ...` (see AGENTS.md "Operational
+> entry point"). `scripts/wsi_prepare_strict_pretraining.py`, the former thin
+> compatibility wrapper around the same `src/data/wsi/corpora.py` functions,
+> was removed in the tile-EAF minimal-pipeline refactor (2026-08-24) — use
+> `eaf.py` directly for every command below.
 
 This update is intentionally **additive**. Existing TCGA raw slides, TRIDENT
 coordinates/features, manifests, and other derived products are never moved or

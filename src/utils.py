@@ -22,6 +22,19 @@ def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# THUNDER `--model-name` values whose checkpoint directory should be named after the
+# actual tile encoder they load, not the THUNDER registry name -- e.g. "titan" in
+# THUNDER's registry returns CONCH v1.5 as the tile-level model (see
+# ThunderBackboneAdapter's docstring), not the WSI-level TITAN foundation model, so a
+# checkpoint dir literally named "titan" would misleadingly suggest the latter.
+TILE_ENCODER_DIR_ALIASES = {"titan": "conch_v15"}
+
+
+def tile_encoder_dir_name(model_name: str) -> str:
+    """Checkpoint-directory-safe name for a THUNDER `--model-name` tile encoder."""
+    return TILE_ENCODER_DIR_ALIASES.get(model_name, model_name)
+
+
 def build_optimizer(model, lr_backbone: float, lr_head: float,
                     weight_decay: float) -> torch.optim.AdamW:
     """AdamW with separate lr for backbone and head."""

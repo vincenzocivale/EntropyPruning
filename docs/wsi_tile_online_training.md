@@ -231,21 +231,11 @@ disable early stopping.
 
 ## Compatibility entry points
 
-The historical commands now delegate to the online implementations:
-
-```text
-scripts/train_forecaster.py
-scripts/train_multi_thunder_forecaster.py
-  -> scripts/train_wsi_tile_eaf_online.py
-
-scripts/finetune_pruned.py
-scripts/finetune_multi_thunder_pruned.py
-  -> scripts/finetune_wsi_tile_encoder_pruned_online.py
-```
-
-Their old cache-oriented and supervised CLI arguments are intentionally no
-longer accepted. This prevents accidental recreation of multi-gigabyte HDF5
-feature stores or task-specific pruned encoders.
+The historical compatibility shims (`scripts/train_forecaster.py`,
+`scripts/train_multi_thunder_forecaster.py`, `scripts/finetune_pruned.py`,
+`scripts/finetune_multi_thunder_pruned.py`) have been removed as part of the
+tile-EAF minimal-pipeline refactor. Use `scripts/train_wsi_tile_eaf_online.py`
+and `scripts/finetune_wsi_tile_encoder_pruned_online.py` directly.
 
 ## Recommended smoke test
 

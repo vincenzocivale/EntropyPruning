@@ -17,9 +17,7 @@ conda activate trident
 
 Key dependencies: PyTorch 2.6.0, transformers 4.51.3, timm 1.0.25, peft (LoRA), wandb, h5py, fvcore.
 
-## Three-Phase Training Pipeline
-
-### Phase 1 — Classifier fine-tuning
+## Classifier fine-tuning (pre-WSI, Phase 1 only)
 
 ```bash
 python scripts/train_classifier.py \
@@ -34,39 +32,15 @@ python scripts/train_classifier.py \
 
 Trains `UNILoRAClassifier` (pretrained UNI + LoRA + linear head). Checkpoint saved as `best_model.pt`.
 
-### Phase 2 — Attention forecaster training
-
-```bash
-python scripts/train_forecaster.py \
-    --data-dir /path/to/dataset \
-    --layers-source 2 \
-    --layer-target 23 \
-    --hidden 256 \
-    --n-heads 4 \
-    --n-layers 2 \
-    --epochs 30 \
-    --lr 1e-4 \
-    --wandb-project attention-forecaster
-```
-
-Automatically extracts embeddings and attention maps from the frozen Phase 1 classifier via hooks, caches them to HDF5 at `/raid/DATASETS/data_cache/`, then trains `AttentionForecaster` to minimize KL divergence. Validates using Spearman rho.
-
-### Phase 3 — Pruned model fine-tuning
-
-```bash
-python scripts/finetune_pruned.py \
-    --data-dir /path/to/dataset \
-    --classifier-ckpt /path/to/best_model.pt \
-    --forecaster-ckpt /path/to/forecaster_src02_tgt23.pt \
-    --prune-layer 2 \
-    --keep-ratio 0.1 \
-    --epochs 20 \
-    --lr-head 1e-3 \
-    --lr-backbone 1e-4 \
-    --wandb-project pruned-finetuning
-```
-
-Wires the forecaster into the classifier via a hook at `prune-layer`. Uses a straight-through estimator (soft masking) for differentiable pruning during training.
+This was originally "Phase 1" of a three-phase pipeline (classifier → forecaster →
+pruned fine-tuning) on plain image-classification datasets. Phases 2 and 3
+(`train_forecaster.py`, `finetune_pruned.py`) were retired in the tile-EAF
+minimal-pipeline refactor (2026-08-24): both had already been repurposed into thin
+compatibility shims delegating to the WSI tile-EAF scripts below, and are now removed
+entirely. For attention-forecaster training and pruned-encoder fine-tuning, use the
+tile-EAF pipeline documented in `docs/wsi_tile_online_training.md` and
+`docs/offline_eaf_pipeline.md` (`scripts/train_wsi_tile_eaf_online.py`,
+`scripts/finetune_wsi_tile_encoder_pruned_online.py`) instead.
 
 ### Layer ablation study
 
@@ -119,7 +93,10 @@ kept once per cohort, while checkpoints, logs, rankings, and generated WSI
 feature stores are disposable run artifacts. See `docs/data_layout.md` for the
 canonical directory layout and placement rules.
 
-The tile-level forecaster cache uses the following HDF5 layout:
+Legacy (Phase 2/3, retired) tile-level forecaster cache HDF5 layout, kept here only to
+explain any pre-existing artifacts still on disk under
+`/raid/DATASETS/checkpoints-Attention-Pruning/{dataset}/` — current code no longer
+produces this layout (see the note above the "Layer ablation study" section):
 
 ```
 {dataset}_forecaster_dataset.h5
@@ -129,12 +106,14 @@ The tile-level forecaster cache uses the following HDF5 layout:
     └── attn_layer{i}   [n_samples × 196]
 ```
 
-**Checkpoints** (`/raid/DATASETS/checkpoints-Attention-Pruning/{dataset}/`):
 ```
 uni_finetuned/best_model.pt
 forecaster/forecaster_src{src:02d}_tgt{tgt:02d}.pt
 pruned_finetuned/pruned_models/
 ```
+
+For current tile-EAF checkpoint layout (`checkpoints/tile_eaf/`,
+`checkpoints/pruned_finetuned/` under `$EAF_WSI_ROOT`), see `docs/data_layout.md`.
 
 ## WSI EAF Training Data Policy
 

@@ -27,7 +27,7 @@ from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
 from src.models import AttentionForecaster, ThunderBackboneAdapter
 from src.models.online_tile_eaf import OnlineAttentionTeacher, load_checkpoint_flexibly
-from src.utils import set_seed
+from src.utils import set_seed, tile_encoder_dir_name
 
 
 def _autocast(device: torch.device, amp_dtype: str):
@@ -332,7 +332,14 @@ def main() -> None:
     parser.add_argument("--val-fraction", type=float, default=0.10)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--slide-group", nargs="+", default=["diagnostic"])
-    parser.add_argument("--exclude-cohort", nargs="*", default=[])
+    parser.add_argument(
+        "--exclude-cohort", nargs="*", default=["HISTAI-mixed", "HISTAI-skin-b2"],
+        help=(
+            "HISTAI subsets to exclude (default: the two largest/slowest-to-download "
+            "subsets, HISTAI-mixed and HISTAI-skin-b2 -- pass --exclude-cohort with no "
+            "values to include everything)"
+        ),
+    )
     parser.add_argument("--default-patch-size", type=int, default=512)
     parser.add_argument(
         "--tile-size-at-target-mag", type=int, default=None,
@@ -400,7 +407,7 @@ def main() -> None:
             "boundary; 0 disables the mid-epoch checkpoint (epoch boundary only)"
         ),
     )
-    parser.add_argument("--wandb-project", default="eaf-tile-online")
+    parser.add_argument("--wandb-project", default="EAF-Tile-level")
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--run-name", default=None)
@@ -496,10 +503,17 @@ def main() -> None:
                 f"Cache encoder={cache_encoder!r} is incompatible with "
                 f"--model-name={args.model_name!r}"
             )
-        if int(cache_spec.get("early_layer", args.source_layer)) != args.source_layer:
-            raise ValueError(
-                f"Cache documents early_layer={cache_spec.get('early_layer')}, "
-                f"but training requested --source-layer={args.source_layer}"
+        cache_early_layer = int(cache_spec.get("early_layer", args.source_layer))
+        if cache_early_layer != args.source_layer:
+            # `TileCacheSpec.cache_id` deliberately excludes `early_layer` (see
+            # `cache_contracts.py`): the cached final_attention/tile_embeddings never
+            # depend on it, only `extract_early`'s online recompute does. So one cache
+            # per encoder already supports every --source-layer experiment; the
+            # recorded value is just the layer `eaf.py cache tile` happened to be
+            # invoked with, not a constraint on this run.
+            print(
+                f"[train] Note: cache documents early_layer={cache_early_layer} "
+                f"(informational only); training with --source-layer={args.source_layer}"
             )
         attention_shape = cache_info["datasets"]["final_attention"]
         if len(attention_shape) != 2 or int(attention_shape[1]) != adapter.n_patches:
@@ -555,15 +569,19 @@ def main() -> None:
         "cuda", enabled=args.amp_dtype == "fp16"
     )
 
+    # Run names are just <tile-encoder>_src<NN> -- every other hyperparameter
+    # (target layer, tiles-per-wsi, lr, cache mode, ...) is still fully captured
+    # in wandb.config below, it just no longer bloats the display name.
+    run_name = args.run_name or f"{args.model_name}_src{args.source_layer:02d}"
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
-        else Path(f"checkpoints/tile_eaf/{args.model_name}").resolve()
+        # One subdirectory per run under checkpoints/tile_eaf/<tile-encoder>/ so
+        # sweeping --source-layer never scatters same-encoder runs into
+        # same-directory files distinguished only by filename suffix.
+        else (Path("checkpoints/tile_eaf") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_name = args.run_name or (
-        f"{args.model_name}_src{args.source_layer:02d}_tgt{target_layer:02d}_online"
-    )
 
     # Resume state (overridden below if --resume is given). A fresh run
     # starts at epoch 0 with nothing to skip.
@@ -638,12 +656,9 @@ def main() -> None:
                 "resolved_train_wsis_per_epoch": resolved_train_wsis,
                 "resolved_train_tiles_per_epoch": resolved_train_wsis * args.tiles_per_wsi,
             },
-            tags=[
-                args.model_name,
-                "tile_eaf",
-                "compact_cache" if args.target_cache_index else "online",
-                "task_agnostic",
-            ],
+            # Tags are just tile-encoder + source layer -- everything else (target
+            # layer, cache mode, hyperparameters, ...) is still in wandb.config.
+            tags=[tile_encoder_dir_name(args.model_name), f"src{args.source_layer:02d}"],
         )
     wandb_run_id = wandb.run.id if use_wandb else None
 

@@ -83,9 +83,20 @@ scripts/wsi_audit_titan_attention_structure.py
 scripts/wsi_complete_titan_attention_audit.py
 ```
 
-Also review `train_classifier.py`, `train_forecaster.py` and old WSI forecaster/import
-entry points. Delete them only if no active downstream benchmark depends on them. Keep
-real `pytest` tests; remove manual smoke/debug scripts, not automated coverage.
+Also review `train_classifier.py` and old WSI forecaster/import entry points. Delete
+them only if no active downstream benchmark depends on them. Keep real `pytest` tests;
+remove manual smoke/debug scripts, not automated coverage.
+
+`train_forecaster.py`, `train_multi_thunder_forecaster.py`, `finetune_pruned.py`,
+`finetune_multi_thunder_pruned.py`, and the older cache-based tile-EAF pair
+(`build_wsi_tile_eaf_cache.py`/`train_forecaster_from_cache.py`,
+`build_thunder_online_forecaster_cache.py`/`train_thunder_online_forecaster.py`,
+`compare_thunder_online_runs.py`) were removed in the tile-EAF minimal-pipeline
+refactor (2026-08-24) — all were compatibility shims or superseded by
+`train_wsi_tile_eaf_online.py` / `finetune_wsi_tile_encoder_pruned_online.py`, which
+already unify the online and cache-backed (`--target-cache-index`) code paths.
+`scripts/wsi_prepare_strict_pretraining.py` was removed the same pass; use
+`python scripts/eaf.py data ...` directly.
 
 Before each deletion group run:
 

@@ -23,8 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from thunder.models.pretrained_models import get_model_from_name
 
 from src.utils import set_seed, get_device, grad_norm, save_results
-from src.models import ThunderBackboneAdapter, STRATEGIES
+from src.models import ThunderBackboneAdapter, AttentionForecaster, STRATEGIES
 from src.models.multi_head_classifier import MultiHeadThunderClassifier
+from src.models.online_tile_eaf import PrunedLoRAEncoder
 from src.data.thunder_multi import ThunderDatasetRegistry, build_multi_thunder_train_loaders
 
 
@@ -127,6 +128,41 @@ def main():
     parser.add_argument("--adaptation", type=str, default="lora", choices=STRATEGIES)
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=32)
+    # Tile-EAF pruned-encoder linear probing (Stage 3 evaluation). Omit
+    # --pruned-adapter-ckpt to train a plain (non-pruned) baseline classifier as
+    # before -- everything below only applies once it is given.
+    parser.add_argument(
+        "--pruned-adapter-ckpt", default=None,
+        help=(
+            "Stage-2 checkpoint from finetune_wsi_tile_encoder_pruned_online.py "
+            "(best_*_adapter.pt). When given, --model-name is wrapped in a frozen "
+            "forecaster-pruned PrunedLoRAEncoder and --adaptation is forced to "
+            "'linear_probing' -- this evaluates the pruned tile encoder's linear-probe "
+            "quality, not a fresh adaptation of it."
+        ),
+    )
+    parser.add_argument(
+        "--forecaster-ckpt", default=None,
+        help="Overrides the forecaster path recorded in --pruned-adapter-ckpt's checkpoint",
+    )
+    parser.add_argument(
+        "--prune-layer", type=int, default=None,
+        help="Overrides the prune_layer recorded in --pruned-adapter-ckpt's checkpoint",
+    )
+    parser.add_argument(
+        "--keep-ratio", type=float, default=None,
+        help="Overrides the keep_ratio recorded in --pruned-adapter-ckpt's checkpoint",
+    )
+    parser.add_argument("--pruned-lora-r", type=int, default=8)
+    parser.add_argument("--pruned-lora-alpha", type=int, default=32)
+    parser.add_argument("--pruned-lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--forecaster-hidden", type=int, default=256,
+        help="Must match --hidden used at Stage-1 forecaster training time",
+    )
+    parser.add_argument("--forecaster-n-heads", type=int, default=4)
+    parser.add_argument("--forecaster-n-layers", type=int, default=2)
+    parser.add_argument("--forecaster-dropout", type=float, default=0.1)
     # Training
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -164,6 +200,63 @@ def main():
           f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
           f"n_patches={adapter.n_patches}")
 
+    # --- Optional: wrap in a frozen forecaster-pruned encoder (Stage 3 eval) ---
+    # backbone_for_model is what MultiHeadThunderClassifier actually adapts;
+    # `adapter` stays the same object either way (PrunedLoRAEncoder is built from it).
+    backbone_for_model = raw_backbone
+    pruning_info: dict | None = None
+    if args.pruned_adapter_ckpt:
+        pruned_payload = torch.load(args.pruned_adapter_ckpt, map_location="cpu")
+        pruned_config = pruned_payload.get("config", {})
+        forecaster_ckpt = args.forecaster_ckpt or pruned_payload.get("forecaster_checkpoint")
+        if not forecaster_ckpt:
+            raise ValueError(
+                "--forecaster-ckpt was not given and --pruned-adapter-ckpt's checkpoint "
+                "does not record a 'forecaster_checkpoint' path"
+            )
+        prune_layer = args.prune_layer if args.prune_layer is not None else pruned_config.get("prune_layer")
+        keep_ratio = args.keep_ratio if args.keep_ratio is not None else pruned_config.get("keep_ratio")
+        if prune_layer is None or keep_ratio is None:
+            raise ValueError(
+                "--prune-layer/--keep-ratio were not given and could not be resolved "
+                "from --pruned-adapter-ckpt's checkpoint config"
+            )
+        forecaster = AttentionForecaster(
+            embed_dim=adapter.embed_dim,
+            hidden=args.forecaster_hidden,
+            n_heads=args.forecaster_n_heads,
+            n_layers=args.forecaster_n_layers,
+            dropout=args.forecaster_dropout,
+        )
+        forecaster_payload = torch.load(forecaster_ckpt, map_location="cpu")
+        forecaster.load_state_dict(forecaster_payload["model"], strict=True)
+        pruned_encoder = PrunedLoRAEncoder(
+            raw_backbone, adapter, forecaster,
+            prune_layer=int(prune_layer), keep_ratio=float(keep_ratio),
+            lora_r=args.pruned_lora_r, lora_alpha=args.pruned_lora_alpha,
+            lora_dropout=args.pruned_lora_dropout,
+        )
+        pruned_encoder.load_trainable_state_dict(pruned_payload["trainable_state_dict"])
+        pruned_encoder.eval()
+        backbone_for_model = pruned_encoder
+        pruning_info = {
+            "pruned_adapter_ckpt": str(args.pruned_adapter_ckpt),
+            "forecaster_ckpt": str(forecaster_ckpt),
+            "prune_layer": int(prune_layer),
+            "keep_ratio": float(keep_ratio),
+        }
+        if args.adaptation != "linear_probing":
+            print(
+                f"[eval] --pruned-adapter-ckpt given: forcing --adaptation "
+                f"linear_probing (was {args.adaptation!r}) -- the pruned encoder is "
+                "frozen/already-distilled, not something to re-adapt per dataset"
+            )
+            args.adaptation = "linear_probing"
+        print(
+            f"[eval] Frozen forecaster-pruned encoder: prune_layer={prune_layer} "
+            f"keep_ratio={keep_ratio} (from {args.pruned_adapter_ckpt})"
+        )
+
     # --- Data ---
     train_loader, val_loader, dataset_info = build_multi_thunder_train_loaders(
         registry.train_datasets,
@@ -179,8 +272,12 @@ def main():
         print(f"  [{idx}] {info['name']}: {info['n_classes']} classes, {count} train samples")
 
     # --- Output dir ---
+    default_dir_name = f"{args.model_name}_{args.adaptation}"
+    if pruning_info is not None:
+        keep_pct = int(round(pruning_info["keep_ratio"] * 100))
+        default_dir_name += f"_pruned_src{pruning_info['prune_layer']:02d}_keep{keep_pct}pct"
     output_dir = Path(args.output_dir) if args.output_dir else \
-        Path(f"checkpoints/multi_thunder/{args.model_name}_{args.adaptation}")
+        Path(f"checkpoints/multi_thunder/{default_dir_name}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Save holdout plan (before training — Phases 2/3 need it) ---
@@ -191,7 +288,7 @@ def main():
     if args.adaptation == "lora":
         kwargs.update(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
     model = MultiHeadThunderClassifier(
-        raw_backbone, adapter, dataset_info, args.adaptation, **kwargs
+        backbone_for_model, adapter, dataset_info, args.adaptation, **kwargs
     ).to(device)
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -200,7 +297,7 @@ def main():
           f"({100 * n_trainable / n_total:.2f}%)")
 
     # --- W&B ---
-    run_name = args.run_name or f"{args.model_name}_multi_{args.adaptation}"
+    run_name = args.run_name or f"{args.model_name}_multi_{default_dir_name[len(args.model_name) + 1:]}"
     use_wandb = args.wandb_project is not None
     if use_wandb:
         wandb.init(
@@ -211,8 +308,10 @@ def main():
                 "holdout_datasets": registry.holdout_datasets,
                 "n_trainable_params": n_trainable,
                 "n_total_params": n_total,
+                "pruning": pruning_info,
             },
-            tags=[args.model_name, args.adaptation, "phase1", "multi_dataset"],
+            tags=[args.model_name, args.adaptation, "phase1", "multi_dataset"]
+            + (["pruned_tile_eaf"] if pruning_info is not None else ["baseline"]),
         )
 
     # --- Optimizer ---
@@ -290,6 +389,7 @@ def main():
     results = {
         "model_name": args.model_name,
         "adaptation": args.adaptation,
+        "pruning": pruning_info,
         "train_datasets": registry.train_datasets,
         "holdout_datasets": registry.holdout_datasets,
         "best_epoch": best_epoch,

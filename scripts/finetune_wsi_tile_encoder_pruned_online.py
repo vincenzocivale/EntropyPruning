@@ -26,7 +26,7 @@ from src.models.online_tile_eaf import (
     load_checkpoint_flexibly,
     unwrap_checkpoint_state,
 )
-from src.utils import set_seed
+from src.utils import set_seed, tile_encoder_dir_name
 from src.wsi_pipeline.cache_index import read_tile_cache_index
 from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
@@ -155,7 +155,14 @@ def main() -> None:
     parser.add_argument("--val-fraction", type=float, default=0.10)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--slide-group", nargs="+", default=["diagnostic"])
-    parser.add_argument("--exclude-cohort", nargs="*", default=[])
+    parser.add_argument(
+        "--exclude-cohort", nargs="*", default=["HISTAI-mixed", "HISTAI-skin-b2"],
+        help=(
+            "HISTAI subsets to exclude (default: the two largest/slowest-to-download "
+            "subsets, HISTAI-mixed and HISTAI-skin-b2 -- pass --exclude-cohort with no "
+            "values to include everything)"
+        ),
+    )
     parser.add_argument("--default-patch-size", type=int, default=512)
     parser.add_argument(
         "--tile-size-at-target-mag", type=int, default=None,
@@ -193,7 +200,7 @@ def main() -> None:
     parser.add_argument("--grad-accum", type=int, default=2)
     parser.add_argument("--amp-dtype", choices=("bf16", "fp16"), default="bf16")
     parser.add_argument("--gradient-checkpointing", action="store_true")
-    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-patience", type=int, default=3)
     parser.add_argument("--early-stopping-min-delta", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -205,7 +212,7 @@ def main() -> None:
         "--output-dir", default=None,
         help="Defaults to checkpoints/pruned_finetuned/<model-name> (tile-encoder-dependent)",
     )
-    parser.add_argument("--wandb-project", default="eaf-pruned-tile-online")
+    parser.add_argument("--wandb-project", default="EAF-Tile-level-Pruned")
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--run-name", default=None)
@@ -365,15 +372,21 @@ def main() -> None:
         f"({'compact_cache' if cached_targets else 'online_teacher_forward'} targets)"
     )
 
+    # <tile-encoder>_src<NN>_pruned<keep%>pct -- same base naming convention as
+    # train_wsi_tile_eaf_online.py (prune_layer plays the role of source_layer
+    # here), plus the keep-ratio that distinguishes the 30/20/10% variants.
+    run_name = args.run_name or (
+        f"{args.model_name}_src{args.prune_layer:02d}_pruned{int(round(args.keep_ratio * 100))}pct"
+    )
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
-        else Path(f"checkpoints/pruned_finetuned/{args.model_name}").resolve()
+        # One subdirectory per run under checkpoints/pruned_finetuned/<tile-encoder>/
+        # so sweeping --keep-ratio never scatters same-encoder runs into
+        # same-directory files distinguished only by filename suffix.
+        else (Path("checkpoints/pruned_finetuned") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_name = args.run_name or (
-        f"{args.model_name}_prune{args.prune_layer}_keep{int(args.keep_ratio * 100)}_online"
-    )
     checkpoint_path = output_dir / f"best_{run_name}_adapter.pt"
     use_wandb = args.wandb_mode != "disabled"
     if use_wandb:
@@ -394,7 +407,13 @@ def main() -> None:
                 "cached_targets": cached_targets,
                 "single_backbone_teacher_student": not cached_targets,
             },
-            tags=[args.model_name, "pruned_tile_encoder", "online", "task_agnostic"],
+            # Tags are just tile-encoder + source layer + keep-ratio -- everything
+            # else (loss weights, LoRA rank, cache mode, ...) is still in wandb.config.
+            tags=[
+                tile_encoder_dir_name(args.model_name),
+                f"src{args.prune_layer:02d}",
+                f"keep{int(round(args.keep_ratio * 100))}pct",
+            ],
         )
 
     best_val = math.inf

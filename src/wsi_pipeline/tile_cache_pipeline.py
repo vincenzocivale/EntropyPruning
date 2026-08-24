@@ -75,24 +75,35 @@ def cache_path_for(output_dir: Path, slide_id: str) -> Path:
     return Path(output_dir) / f"{slide_id}.h5"
 
 
-# Revision tag recorded in every conch_v15 TileCacheSpec/cache_id. Exposed as a
-# constant (not just a literal inside build_encoder) so callers that need to
-# pre-compute a matching cache_id/output path -- e.g. the HISTAI orchestrator's
-# per-subset directory naming -- never have to instantiate the model to do it, and
-# can never drift from the string build_encoder() actually uses.
+# Revision tags recorded in every TileCacheSpec/cache_id. Exposed as constants (not
+# just literals inside build_encoder) so callers that need to pre-compute a matching
+# cache_id/output path -- e.g. the HISTAI orchestrator's per-subset directory naming --
+# never have to instantiate the model to do it, and can never drift from the string
+# build_encoder() actually uses.
 CONCH_V15_REVISION = "titan-return_conch"
+THUNDER_REVISION = "thunder-get_model_from_name"
 
 
 def build_encoder(
     encoder_name: str, *, token: str | None, device: torch.device
 ) -> HookedViTTileTeacherAdapter:
+    """Load the frozen tile teacher for ``--encoder``.
+
+    ``conch_v15`` keeps its dedicated, numerically-validated ``from_conch()`` path
+    (TITAN's ``return_conch()`` accessor). Every other name is resolved through
+    THUNDER's own model registry (``from_thunder_model``), the same loading path
+    already used by the online trainer/pruner (``ThunderBackboneAdapter`` +
+    ``get_model_from_name``) -- e.g. ``uni2h``, ``virchow2``, ``hoptimus1``,
+    ``provgigapath``. Anything THUNDER's registry doesn't recognize, or whose
+    attention module isn't a standard timm ``qkv``-style block, fails loudly inside
+    ``HookedViTTileTeacherAdapter`` rather than here.
+    """
     if encoder_name == "conch_v15":
         return HookedViTTileTeacherAdapter.from_conch(
             token=token, revision=CONCH_V15_REVISION, device=device
         )
-    raise ValueError(
-        f"Unsupported --encoder {encoder_name!r}; only 'conch_v15' is wired end-to-end today. "
-        "Extend HookedViTTileTeacherAdapter.from_timm(...) for UNI/UNI2/Virchow-style teachers."
+    return HookedViTTileTeacherAdapter.from_thunder_model(
+        encoder_name, revision=THUNDER_REVISION, device=device
     )
 
 
