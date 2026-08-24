@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,25 @@ TILE_ENCODER_DIR_ALIASES = {"titan": "conch_v15"}
 def tile_encoder_dir_name(model_name: str) -> str:
     """Checkpoint-directory-safe name for a THUNDER `--model-name` tile encoder."""
     return TILE_ENCODER_DIR_ALIASES.get(model_name, model_name)
+
+
+def default_checkpoint_root(subdir: str) -> Path:
+    """`$EAF_WSI_ROOT/checkpoints/<subdir>` (see `src/data/wsi/layout.py::StoreLayout`)
+    -- checkpoints belong under the canonical data root, not the repo working
+    directory. Falls back to a repo-relative `checkpoints/<subdir>` (with a
+    warning) when `$EAF_WSI_ROOT` isn't set, rather than hard-failing, so ad-hoc
+    smoke tests without the full environment configured still work.
+    """
+    root = os.environ.get("EAF_WSI_ROOT")
+    if root:
+        return Path(root).expanduser().resolve() / "checkpoints" / subdir
+    print(
+        f"[checkpoint] Warning: $EAF_WSI_ROOT not set; defaulting to "
+        f"./checkpoints/{subdir} (repo-relative) instead of the canonical "
+        "$EAF_WSI_ROOT/checkpoints/... location -- set $EAF_WSI_ROOT or pass "
+        "--output-dir explicitly to avoid this."
+    )
+    return Path(f"checkpoints/{subdir}").resolve()
 
 
 def build_optimizer(model, lr_backbone: float, lr_head: float,

@@ -9,11 +9,15 @@ non è coperta da questo documento.
 
 - **Naming run**: `<tile-encoder>_src<NN>` (forecaster), `<tile-encoder>_src<NN>_pruned<keep%>pct`
   (pruning). Progetto W&B: `EAF-Tile-level` (Stage 1), `EAF-Tile-level-Pruned` (Stage 2).
-- **Checkpoint**: `checkpoints/tile_eaf/<tile-encoder>/<run>/best_<run>.pt` +
-  `summary_<run>.json`, una sotto-directory per run (mai file distinti solo dal
-  suffisso del nome). `<tile-encoder>` è il nome reale dell'encoder caricato (es.
-  `conch_v15`), non necessariamente il `--model-name` THUNDER usato per caricarlo
-  (`titan` → `conch_v15`, vedi `src/utils.py::tile_encoder_dir_name`).
+- **Checkpoint**: `$EAF_WSI_ROOT/checkpoints/tile_eaf/<tile-encoder>/<run>/best_<run>.pt`
+  + `summary_<run>.json` (idem `pruned_finetuned/`, `multi_thunder/`) — sotto la
+  cartella dati canonica, non sotto la repo (`src/utils.py::default_checkpoint_root`,
+  fix 2026-08-24; prima il default cadeva erroneamente in `EAF/checkpoints/`
+  relativo alla repo). Fallback su `EAF/checkpoints/` con warning se
+  `$EAF_WSI_ROOT` non è impostato. Una sotto-directory per run (mai file distinti
+  solo dal suffisso del nome). `<tile-encoder>` è il nome reale dell'encoder
+  caricato (es. `conch_v15`), non necessariamente il `--model-name` THUNDER usato
+  per caricarlo (`titan` → `conch_v15`, vedi `src/utils.py::tile_encoder_dir_name`).
 - **Cohort default**: `HISTAI-mixed` e `HISTAI-skin-b2` esclusi di default
   (`--exclude-cohort`) in ogni script tile-EAF — i due sotto-set HISTAI più grandi e
   lenti da scaricare.

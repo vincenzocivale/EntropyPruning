@@ -26,7 +26,7 @@ from src.models.online_tile_eaf import (
     load_checkpoint_flexibly,
     unwrap_checkpoint_state,
 )
-from src.utils import set_seed, tile_encoder_dir_name
+from src.utils import default_checkpoint_root, set_seed, tile_encoder_dir_name
 from src.wsi_pipeline.cache_index import read_tile_cache_index
 from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
@@ -382,10 +382,11 @@ def main() -> None:
     output_dir = (
         Path(args.output_dir).expanduser().resolve()
         if args.output_dir
-        # One subdirectory per run under checkpoints/pruned_finetuned/<tile-encoder>/
-        # so sweeping --keep-ratio never scatters same-encoder runs into
-        # same-directory files distinguished only by filename suffix.
-        else (Path("checkpoints/pruned_finetuned") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
+        # One subdirectory per run under
+        # $EAF_WSI_ROOT/checkpoints/pruned_finetuned/<tile-encoder>/ so sweeping
+        # --keep-ratio never scatters same-encoder runs into same-directory files
+        # distinguished only by filename suffix.
+        else (default_checkpoint_root("pruned_finetuned") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / f"best_{run_name}_adapter.pt"

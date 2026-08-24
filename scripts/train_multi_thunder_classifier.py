@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thunder.models.pretrained_models import get_model_from_name
 
-from src.utils import set_seed, get_device, grad_norm, save_results
+from src.utils import default_checkpoint_root, set_seed, get_device, grad_norm, save_results
 from src.models import ThunderBackboneAdapter, AttentionForecaster, STRATEGIES
 from src.models.multi_head_classifier import MultiHeadThunderClassifier
 from src.models.online_tile_eaf import PrunedLoRAEncoder
@@ -277,7 +277,7 @@ def main():
         keep_pct = int(round(pruning_info["keep_ratio"] * 100))
         default_dir_name += f"_pruned_src{pruning_info['prune_layer']:02d}_keep{keep_pct}pct"
     output_dir = Path(args.output_dir) if args.output_dir else \
-        Path(f"checkpoints/multi_thunder/{default_dir_name}")
+        default_checkpoint_root("multi_thunder") / default_dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Save holdout plan (before training — Phases 2/3 need it) ---
