@@ -156,10 +156,15 @@ budget di epoche coerente e verificato-completo per tutti (i checkpoint preceden
 erano stati eliminati: uno senza summary/epoche non verificabili, gli altri due
 fermati a 5/20 epoche pianificate — budget incoerente per un confronto valido).
 
-**Stato (2026-08-24)**: `titan_src02_pruned20pct` in corso. `titan_src02_pruned30pct`
-e `titan_src02_pruned10pct` in coda (script `queue_pruning_runs.sh`, non nel repo —
-scratch di sessione), in attesa di margine GPU reale prima di partire in sequenza —
-vedi "Note operative" sopra sul perché non tutti e 4 i run insieme.
+**Stato (2026-08-24)**: `titan_src02_pruned20pct` in corso, riavviato con
+`--tiles-per-wsi 100` (invece di 500 → epoca 3850 batch invece di 19250) dopo aver
+osservato su W&B che la loss di distillazione era in plateau da migliaia di step con
+l'epoca lunga — early-stopping/validation scattano molto più spesso così, nessun
+cambio alla ricetta (lr/LoRA/pesi di loss invariati). `titan_src02_pruned30pct` e
+`titan_src02_pruned10pct` ancora da lanciare, stessa `--tiles-per-wsi 100`,
+manualmente uno alla volta (lo script di coda automatico è stato abbandonato dopo
+una race condition — ha lanciato pruned30pct nello stesso momento del riavvio
+manuale di pruned20pct, rischiando un altro OOM a 3 job).
 
 ## Fase 3 — Stage 3 (linear probing, tutti i dataset THUNDER)
 
