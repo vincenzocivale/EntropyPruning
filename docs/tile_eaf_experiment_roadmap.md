@@ -152,12 +152,25 @@ stdout, non fidarsi di quello per lo stato live)**:
 | `conch_v15_src02` | 2 | 20/20 (fatto) | **0.81** | 0.0889 |
 | `conch_v15_src01` (`6k9dzlz6`) | 1 | 7/20, in corso | 0.781 | 0.104 |
 | `conch_v15_src03` (`kwrqz40t`) | 3 | 2/20, in corso (altra macchina) | 0.759 | 0.112 |
+| `conch_v15_src00` | 0 | interrotto 2026-08-25 (vedi sotto), da rilanciare | — | — |
 
 `conch_v15_src03` gira su un'altra macchina (nessun processo locale corrispondente),
 probabilmente lanciato da un'altra sessione — non c'è contesa GPU locale. Finora
 layer 1 è leggermente sotto il layer 2 (0.781 vs 0.81), non "quasi gratis" come
 sperato — ma `epochs_without_improvement=0` su entrambi, ancora presto per
-concludere. `conch_v15_src00` non ancora lanciato.
+concludere.
+
+**Incidente 2026-08-25**: lanciato `conch_v15_src00` insieme a src01 e pruned30pct
+(3 job concorrenti). `pruned30pct` si è gonfiato a **24.3GB** (peggio ancora del
+pattern già visto con pruned20pct a 19.4GB) — GPU a 36.5GB/40.96GB, margine quasi
+azzerato. Interrotti sia src00 (appena partito, perdita minima) che pruned30pct
+(su richiesta esplicita) per liberare memoria; puliti i worker DataLoader orfani di
+entrambi. Solo src01 è rimasto in esecuzione. **Lezione aggiornata**: i job di
+pruning Stage-2 possono superare 24GB da soli in modo imprevedibile — non vanno mai
+lanciati insieme a un secondo job pesante senza margine ampio (>25GB liberi), anche
+se il margine iniziale sembra sufficiente. `conch_v15_src00` e
+`conch_v15_src02_pruned30pct`/`pruned10pct` restano da rilanciare, uno alla volta,
+verificando la stabilizzazione della memoria prima di aggiungerne un altro.
 
 ## Fase 2 — Stage 2 (pruning distillation), sul layer vincente
 
