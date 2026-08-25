@@ -91,10 +91,15 @@ Stessa cache/manifest per entrambi gli stage — la distillazione Stage 2 legge
 Lezioni dall'incidente del 2026-08-24 (lanciando 4 job concorrenti tramite MPS,
 vedi Fase 1/2 sotto), utili per ogni lancio futuro su questa macchina:
 
-- **Sempre `--num-workers 16 --slide-cache-size 20`** con `--slides-per-batch 16`
-  (il default dello script, `--num-workers 8 --slide-cache-size 4`, causa un pattern
-  a raffica-poi-stallo: con `slide-cache-size` troppo piccolo rispetto a
-  `slides-per-batch`, quasi ogni WSI del gruppo va riaperta da zero ad ogni batch).
+- **`--num-workers 16 --slide-cache-size 20 --slides-per-batch 16 --epochs 20
+  --lr 2e-4`** (Stage 1: `--batch-size 128 --tiles-per-wsi 500`; Stage 2:
+  `--batch-size 64 --tiles-per-wsi 100`) sono ora i **default degli script stessi**
+  (fix 2026-08-25 — prima erano solo una convenzione da ricordare ad ogni lancio,
+  col rischio concreto di ricadere sui vecchi default non tarati, incluso `--lr
+  1e-4` mai realmente usato e `--epochs` 40/30 invece di 20). Il vecchio default
+  `--num-workers 8 --slide-cache-size 4` causa un pattern a raffica-poi-stallo: con
+  `slide-cache-size` troppo piccolo rispetto a `slides-per-batch`, quasi ogni WSI
+  del gruppo va riaperta da zero ad ogni batch.
 - **MPS**: su GPU condivisa con altri processi, lanciare sempre con
   `CUDA_MPS_PIPE_DIRECTORY=/data2/home/vcivale/mps/pipe
   CUDA_MPS_LOG_DIRECTORY=/data2/home/vcivale/mps/log` (demone MPS già attivo sulla

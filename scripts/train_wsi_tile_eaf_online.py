@@ -349,27 +349,37 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--slides-per-batch", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=128)
+    # 16, not 4: with this batch size, --slides-per-batch must scale up too or
+    # tiles_per_slide_per_batch shrinks enough that rounds_per_group collides with
+    # --num-workers, forcing near-constant cold WSI-handle reopening (see "Note
+    # operative" in docs/tile_eaf_experiment_roadmap.md for the exact mechanism).
+    parser.add_argument("--slides-per-batch", type=int, default=16)
     parser.add_argument(
         "--train-wsis-per-epoch", type=int, default=0,
         help="Exact WSI count per epoch; 0 resolves from --train-wsi-fraction",
     )
     parser.add_argument("--train-wsi-fraction", type=float, default=0.5)
-    parser.add_argument("--tiles-per-wsi", type=int, default=24)
+    # 500: unlike Stage-2 pruning distillation, the forecaster keeps improving
+    # over many epochs at this scale (all conch_v15_src00..03 sweep runs used it,
+    # still gaining at epoch 7+) rather than plateauing early, so it is not
+    # shortened the way Stage 2's --tiles-per-wsi was.
+    parser.add_argument("--tiles-per-wsi", type=int, default=500)
     parser.add_argument("--val-wsis", type=int, default=128)
     parser.add_argument("--val-tiles-per-wsi", type=int, default=16)
     parser.add_argument("--cohort-balance-power", type=float, default=0.5)
-    parser.add_argument("--num-workers", type=int, default=8)
+    # 16/20, not 8/4: see the --slide-cache-size note in
+    # finetune_wsi_tile_encoder_pruned_online.py -- same burst-then-stall fix.
+    parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--slide-cache-size", type=int, default=4)
+    parser.add_argument("--slide-cache-size", type=int, default=20)
     parser.add_argument(
         "--openslide-cache-mib", type=int, default=256,
         help="Decoded OpenSlide tile-cache capacity per DataLoader worker (0 uses the library default)",
     )
 
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument(
         "--kl-weight", type=float, default=1.0,

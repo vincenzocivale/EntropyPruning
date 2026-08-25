@@ -172,27 +172,36 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--slides-per-batch", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--slides-per-batch", type=int, default=16)
     parser.add_argument(
         "--train-wsis-per-epoch", type=int, default=0,
         help="Exact WSI count per epoch; 0 resolves from --train-wsi-fraction",
     )
     parser.add_argument("--train-wsi-fraction", type=float, default=0.5)
-    parser.add_argument("--tiles-per-wsi", type=int, default=16)
+    # 100, not the historical 500: distillation loss plateaus within a few hundred
+    # steps (see docs/tile_eaf_experiment_roadmap.md, 2026-08-24 finding on
+    # pruned20pct) -- a shorter epoch lets --early-stopping-patience actually catch
+    # the plateau instead of grinding through ~19k batches before the first check.
+    parser.add_argument("--tiles-per-wsi", type=int, default=100)
     parser.add_argument("--val-wsis", type=int, default=128)
     parser.add_argument("--val-tiles-per-wsi", type=int, default=8)
     parser.add_argument("--cohort-balance-power", type=float, default=0.5)
-    parser.add_argument("--num-workers", type=int, default=8)
+    # 16/20, not 8/4: with --slides-per-batch 16, a --slide-cache-size smaller than
+    # that forces most WSI handles in every batch group to be reopened from
+    # scratch, causing a burst-then-stall pattern (see "Note operative" in
+    # docs/tile_eaf_experiment_roadmap.md). --num-workers 16 matches -- the machine
+    # has far more CPU headroom than 8 workers uses.
+    parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--slide-cache-size", type=int, default=4)
+    parser.add_argument("--slide-cache-size", type=int, default=20)
     parser.add_argument(
         "--openslide-cache-mib", type=int, default=256,
         help="Decoded OpenSlide tile-cache capacity per DataLoader worker",
     )
 
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--cosine-weight", type=float, default=1.0)
     parser.add_argument("--mse-weight", type=float, default=1.0)
