@@ -144,9 +144,20 @@ compatta è indipendente dal source layer, riutilizzabile senza rebuild). Confro
 finale su rho/KL **e** costo computazionale del pruning a quel layer — non vince
 semplicemente la metrica di fit più alta.
 
-**Stato (2026-08-24)**: `titan_src01` (source layer 1) in corso — vedi nota naming
-sopra sul perché si chiama `titan_src01` e non `conch_v15_src01`.
-`conch_v15_src00` non ancora lanciato (in attesa dell'esito di src01).
+**Stato (2026-08-25, via W&B — il file di log locale è indietro per buffering
+stdout, non fidarsi di quello per lo stato live)**:
+
+| Run | Layer | Epoca | val/rho | val/kl |
+|---|---|---|---|---|
+| `conch_v15_src02` | 2 | 20/20 (fatto) | **0.81** | 0.0889 |
+| `conch_v15_src01` (`6k9dzlz6`) | 1 | 7/20, in corso | 0.781 | 0.104 |
+| `conch_v15_src03` (`kwrqz40t`) | 3 | 2/20, in corso (altra macchina) | 0.759 | 0.112 |
+
+`conch_v15_src03` gira su un'altra macchina (nessun processo locale corrispondente),
+probabilmente lanciato da un'altra sessione — non c'è contesa GPU locale. Finora
+layer 1 è leggermente sotto il layer 2 (0.781 vs 0.81), non "quasi gratis" come
+sperato — ma `epochs_without_improvement=0` su entrambi, ancora presto per
+concludere. `conch_v15_src00` non ancora lanciato.
 
 ## Fase 2 — Stage 2 (pruning distillation), sul layer vincente
 
@@ -156,15 +167,14 @@ budget di epoche coerente e verificato-completo per tutti (i checkpoint preceden
 erano stati eliminati: uno senza summary/epoche non verificabili, gli altri due
 fermati a 5/20 epoche pianificate — budget incoerente per un confronto valido).
 
-**Stato (2026-08-24)**: `titan_src02_pruned20pct` in corso, riavviato con
-`--tiles-per-wsi 100` (invece di 500 → epoca 3850 batch invece di 19250) dopo aver
-osservato su W&B che la loss di distillazione era in plateau da migliaia di step con
-l'epoca lunga — early-stopping/validation scattano molto più spesso così, nessun
-cambio alla ricetta (lr/LoRA/pesi di loss invariati). `titan_src02_pruned30pct` e
-`titan_src02_pruned10pct` ancora da lanciare, stessa `--tiles-per-wsi 100`,
-manualmente uno alla volta (lo script di coda automatico è stato abbandonato dopo
-una race condition — ha lanciato pruned30pct nello stesso momento del riavvio
-manuale di pruned20pct, rischiando un altro OOM a 3 job).
+**Stato (2026-08-25)**:
+- `conch_v15_src02_pruned20pct`: **completo**, `best_val_loss=0.02829` (20/20 epoche
+  con `--tiles-per-wsi 100`, ~3850 batch/epoca).
+- `conch_v15_src02_pruned30pct`: appena lanciato, stessa config breve-epoca.
+- `conch_v15_src02_pruned10pct`: ancora da lanciare — manualmente, dopo aver
+  verificato margine GPU reale (non con lo script di coda automatico, abbandonato
+  dopo una race condition che aveva lanciato pruned30pct nello stesso momento di un
+  riavvio manuale, rischiando OOM a 3 job).
 
 ## Fase 3 — Stage 3 (linear probing, tutti i dataset THUNDER)
 
