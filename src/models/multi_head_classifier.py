@@ -17,12 +17,12 @@ from peft.tuners.lora import LoraModel
 from .backbone_adapter import ThunderBackboneAdapter
 
 
-def _make_heads(adapter: ThunderBackboneAdapter, dataset_info: dict, dropout: float) -> nn.ModuleDict:
+def _make_heads(embed_dim: int, dataset_info: dict, dropout: float) -> nn.ModuleDict:
     return nn.ModuleDict({
         str(idx): nn.Sequential(
-            nn.LayerNorm(adapter.embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.Dropout(dropout),
-            nn.Linear(adapter.embed_dim, info["n_classes"]),
+            nn.Linear(embed_dim, info["n_classes"]),
         )
         for idx, info in dataset_info.items()
     })
@@ -72,13 +72,21 @@ class MultiHeadThunderClassifier(nn.Module):
         lora_r: int = 8,
         lora_alpha: int = 32,
         dropout: float = 0.1,
+        embed_dim: int | None = None,
     ):
         super().__init__()
         self.adapter = adapter
         self._dataset_info = dataset_info
         self._adaptation = adaptation
         self.backbone = _apply_adaptation(backbone, adaptation, lora_r, lora_alpha)
-        self.heads = _make_heads(adapter, dataset_info, dropout)
+        # adapter.embed_dim is the raw ViT trunk hidden size, not necessarily
+        # what backbone(x) actually returns. Wrapped models that pool through a
+        # projection head to a different size (e.g. titan/CONCH v1.5: 1024 trunk
+        # -> 768 pooled/contrastive embedding, same distinction documented on
+        # PrunedLoRAEncoder.pooled_embedding) silently mismatch the classifier
+        # heads' input dim unless the caller measures and passes the real
+        # embed_dim (see train_multi_thunder_classifier.py's probe forward).
+        self.heads = _make_heads(embed_dim if embed_dim is not None else adapter.embed_dim, dataset_info, dropout)
 
     @property
     def raw_backbone(self) -> nn.Module:
@@ -139,6 +147,7 @@ class MultiHeadLoRAWithForecasterPruning(nn.Module):
         lora_r: int = 8,
         lora_alpha: int = 32,
         dropout: float = 0.1,
+        embed_dim: int | None = None,
     ):
         super().__init__()
         self.adapter = adapter
@@ -153,7 +162,9 @@ class MultiHeadLoRAWithForecasterPruning(nn.Module):
             lora_dropout=0.1, bias="none",
         )
         self.backbone = LoraModel(backbone, lora_cfg, adapter_name="default")
-        self.heads = _make_heads(adapter, dataset_info, dropout)
+        # See MultiHeadThunderClassifier.__init__ for why this cannot default
+        # to adapter.embed_dim for every backbone.
+        self.heads = _make_heads(embed_dim if embed_dim is not None else adapter.embed_dim, dataset_info, dropout)
 
     @property
     def raw_backbone(self) -> nn.Module:

@@ -1,5 +1,13 @@
 # Project status and handoff
 
+The paper program is tracked in the [experimental roadmap](experimental_roadmap.md),
+with [protocols](experimental_protocols.md) and an
+[execution/implementation runbook](experimental_runbook.md). The refreshed audit
+performed for that documentation update still reports 26 runs (7 complete,
+18 partial, 1 non-comparable), but now detects 20,373 cache metadata/manifest
+files. The 36-file count below is the earlier snapshot, not the current count;
+neither count establishes cache integrity or a number of independent slides.
+
 This page records the verified state on 16 September 2026. It is a handoff for
 work on this repository; the live source of truth remains the read-only audit.
 Run it before selecting work:
@@ -75,10 +83,19 @@ Proceed in this order:
 2. Profile one representative CONCH run before changing it. The profile records
    data wait, teacher, forecaster, backward and metrics time; change one factor
    and profile the same data and parameters again.
-3. Finish paired Tile-EAF evaluation for the completed CONCH settings, including
-   end-to-end inference latency and retained-tile ratio.
-4. Finish paired TITAN WSI evaluation on the existing 29 label tasks, recording
-   skipped tasks and patient-level splits.
+3. Finish paired Tile-EAF evaluation for the completed CONCH settings via
+   `train_multi_thunder_classifier.py --pruned-adapter-ckpt` (THUNDER linear
+   probing — see docs/pipeline.md's "Tile-FM vs WSI-FM evaluation" section),
+   plus end-to-end inference latency and retained-tile ratio. A quick
+   mean-pooled WSI-level downstream probe is a useful correctness smoke test
+   for the encoder (verifies full-vs-pruned forward parity end to end) but is
+   NOT the Tile-FM evaluation protocol and its numbers must not be reported
+   as such — Tile-FM is evaluated on THUNDER, not on WSI-level mean pooling.
+4. Finish paired TITAN WSI evaluation on the existing 29 label tasks (the
+   EAGLE-study downstream panel under
+   `datasets/downstream/wsi_level/<cohort>/labels/`) via
+   `eval_wsi_linear_probing.py --pruned-checkpoint`, recording skipped tasks
+   and patient-level splits.
 5. Only then build and benchmark the missing encoder caches, one encoder at a
    time. Do not launch a multi-model sweep without a measured baseline.
 

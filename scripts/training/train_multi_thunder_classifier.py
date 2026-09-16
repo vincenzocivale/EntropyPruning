@@ -195,6 +195,11 @@ def main():
 
     # --- Backbone ---
     raw_backbone, transform, _ = get_model_from_name(args.model_name, str(device))
+    # get_model_from_name's device argument is not sufficient on its own (other
+    # EAF scripts building this same backbone all follow with an explicit
+    # .to(device) too) -- without this, the pre-construction embed_dim probe
+    # below runs the backbone's weights on CPU against CUDA input tensors.
+    raw_backbone = raw_backbone.to(device)
     adapter = ThunderBackboneAdapter(raw_backbone)
     print(f"\nBackbone: {args.model_name}  "
           f"embed_dim={adapter.embed_dim}  n_blocks={adapter.n_blocks}  "
@@ -227,7 +232,7 @@ def main():
             n_heads=args.forecaster_n_heads,
             n_layers=args.forecaster_n_layers,
             dropout=args.forecaster_dropout,
-        )
+        ).to(device)
         forecaster_payload = torch.load(forecaster_ckpt, map_location="cpu")
         forecaster.load_state_dict(forecaster_payload["model"], strict=True)
         pruned_encoder = PrunedLoRAEncoder(
@@ -235,7 +240,7 @@ def main():
             prune_layer=int(prune_layer), keep_ratio=float(keep_ratio),
             lora_r=args.pruned_lora_r, lora_alpha=args.pruned_lora_alpha,
             lora_dropout=args.pruned_lora_dropout,
-        )
+        ).to(device)
         pruned_encoder.load_trainable_state_dict(pruned_payload["trainable_state_dict"])
         pruned_encoder.eval()
         backbone_for_model = pruned_encoder
@@ -271,6 +276,24 @@ def main():
         count = registry.sample_counts.get(info["name"], "?")
         print(f"  [{idx}] {info['name']}: {info['n_classes']} classes, {count} train samples")
 
+    # --- Probe the real pooled embedding dim ---
+    # adapter.embed_dim is the raw ViT trunk hidden size; some wrapped models
+    # (titan/CONCH v1.5: 1024 trunk -> 768 pooled/contrastive embedding) pool
+    # through a projection head to a different size. Measure what
+    # backbone_for_model(images) actually returns -- the exact call
+    # MultiHeadThunderClassifier._embed makes at train time -- instead of
+    # trusting adapter.embed_dim, which silently mismatches the classifier
+    # heads' input dim for any such backbone.
+    probe_images, _, _ = next(iter(train_loader))
+    with torch.no_grad():
+        probe_out = backbone_for_model(probe_images[:1].to(device))
+        if isinstance(probe_out, (tuple, list)):
+            probe_out = next(t for t in probe_out if torch.is_tensor(t))
+        if probe_out.ndim == 3:
+            probe_out = probe_out[:, 0]
+        embed_dim = int(probe_out.shape[-1])
+    print(f"Probed pooled embedding dim: {embed_dim} (adapter.embed_dim={adapter.embed_dim})")
+
     # --- Output dir ---
     default_dir_name = f"{args.model_name}_{args.adaptation}"
     if pruning_info is not None:
@@ -288,7 +311,7 @@ def main():
     if args.adaptation == "lora":
         kwargs.update(lora_r=args.lora_r, lora_alpha=args.lora_alpha)
     model = MultiHeadThunderClassifier(
-        backbone_for_model, adapter, dataset_info, args.adaptation, **kwargs
+        backbone_for_model, adapter, dataset_info, args.adaptation, embed_dim=embed_dim, **kwargs
     ).to(device)
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

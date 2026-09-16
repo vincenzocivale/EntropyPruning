@@ -36,6 +36,13 @@ Read [data layout](docs/data_layout.md) before changing data,
 [pipeline](docs/pipeline.md) before running an experiment, and
 [project status](docs/continuity.md) before continuing experimental work.
 
+For the paper experiment program, start with the
+[experimental roadmap](docs/experimental_roadmap.md): verified run status,
+planned Tile/WSI foundation models, EAGLE coverage and biomedical experiments.
+The [scientific protocols](docs/experimental_protocols.md) and
+[execution/implementation runbook](docs/experimental_runbook.md) distinguish
+available commands from work that still needs implementation.
+
 ## Script layout
 
 `eaf.py` is the supported operational CLI. Specialized entry points are grouped
