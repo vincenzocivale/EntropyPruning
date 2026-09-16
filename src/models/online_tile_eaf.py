@@ -133,10 +133,7 @@ class OnlineAttentionTeacher:
         # (index 0) is numerically equivalent to slicing it out of the full
         # [B,H,N,N] matrix after softmax, but avoids materializing an N x N
         # fp32 attention matrix on every training step -- the same fix already
-        # applied in HookedViTTileTeacherAdapter._make_final_attn_hook
-        # (src/wsi_pipeline/model_adapters.py) and
-        # FrozenTimmAttentionTeacher._cls_patch_attention
-        # (src/training/online_attention_distillation.py).
+        # Same memory-saving CLS-row computation used by the offline tile teacher.
         cls_logits = (q[:, :, :1] @ k.transpose(-2, -1) * module.scale).float()
         attention = cls_logits.softmax(dim=-1)
         prefix = self.adapter.num_prefix_tokens

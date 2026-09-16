@@ -84,7 +84,7 @@ def main() -> None:
     parser.add_argument(
         "--lora-checkpoint", default=None,
         help=(
-            "Optional trained adapter from finetune_wsi_tile_encoder_pruned_online.py "
+            "Optional trained adapter from distill_tile_encoder.py "
             "(e.g. best_conch_v15_src00_pruned10pct_adapter.pt). Latency/memory are "
             "materially unaffected by whether the LoRA weights are trained; omitted "
             "means the profile runs the same PrunedLoRAEncoder architecture with "

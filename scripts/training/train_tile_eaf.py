@@ -372,7 +372,7 @@ def main() -> None:
     parser.add_argument("--val-tiles-per-wsi", type=int, default=16)
     parser.add_argument("--cohort-balance-power", type=float, default=0.5)
     # 16/20, not 8/4: see the --slide-cache-size note in
-    # finetune_wsi_tile_encoder_pruned_online.py -- same burst-then-stall fix.
+    # distill_tile_encoder.py -- same burst-then-stall fix.
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--slide-cache-size", type=int, default=20)

@@ -3,7 +3,7 @@
 datasets from the configured downstream benchmark bank (see docs/pipeline.md).
 
 Compares the frozen baseline WSI-FM (TITAN) against one or more WSI-EAF
-Stage-2 checkpoints (`scripts/training/finetune_wsi_titan_pruned.py`,
+Stage-2 checkpoints (`scripts/training/distill_wsi_titan.py`,
 `checkpoints/wsi_eaf_pruned/<pair>/<run>/`) by training a plain linear head
 (logistic regression, k-fold cross-validated) on each model's slide
 embeddings for each labeled task. No backbone/forecaster weights are updated
@@ -14,12 +14,12 @@ level up.
 Two embedding sources per task:
 
 - Baseline (frozen TITAN): read the pre-cached `slide_embedding` straight out
-  of the `eaf.wsi.fm_output.v1` cache (`scripts/features/wsi_eaf_infer_wsi_fm.py`
-  output, `--wsi-eaf-root`) -- no model forward pass at all.
+  of the `eaf.wsi.fm_output.v1` cache (`scripts/features/cache_wsi_teacher.py`
+  output, `--teacher-wsi-root`) -- no model forward pass at all.
 - Each `--pruned-checkpoint`: read per-slide `coords`/`tile_embeddings` from
-  the matching Tile-EAF cache (`--tile-eaf-root`) and run them live through
+  the matching Tile-EAF cache (`--tile-input-root`) and run them live through
   `PrunedLoRATitanEncoder` (forecaster-guided pruning + LoRA), exactly as
-  `finetune_wsi_titan_pruned.py` does during training -- there is no
+  `distill_wsi_titan.py` does during training -- there is no
   precomputed pruned slide_embedding cache, pruning is cheap enough to run at
   eval time and this avoids maintaining yet another cache namespace per
   checkpoint.
@@ -113,7 +113,7 @@ def _read_labels(path: Path) -> dict[str, str]:
 
 
 def _load_wsi_forecaster(checkpoint_path: Path, *, device: torch.device):
-    """Mirrors finetune_wsi_titan_pruned.py::_load_forecaster exactly (kept as an
+    """Mirrors distill_wsi_titan.py::_load_forecaster exactly (kept as an
     independent copy since scripts/ is not an importable package)."""
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     fargs = payload["args"]
@@ -292,18 +292,18 @@ def main() -> int:
         help="Defaults to <data-root>/datasets/downstream/wsi_level; scanned for <cohort>/labels/*.csv",
     )
     parser.add_argument(
-        "--wsi-eaf-root", type=Path, required=True,
+        "--teacher-wsi-root", type=Path, required=True,
         help="Baseline WSI-FM output cache root, one subdirectory per cohort "
         "(<root>/<cohort>/<slide_id>.npyd, eaf.wsi.fm_output.v1 schema; legacy .h5 accepted)",
     )
     parser.add_argument(
-        "--tile-eaf-root", type=Path, default=None,
+        "--tile-input-root", type=Path, default=None,
         help="Tile-EAF cache root feeding --pruned-checkpoint (required if any given), "
-        "one subdirectory per cohort matching --wsi-eaf-root's",
+        "one subdirectory per cohort matching --teacher-wsi-root's",
     )
     parser.add_argument(
         "--pruned-checkpoint", type=Path, action="append", default=[],
-        help="Repeatable: a WSI-EAF Stage-2 best_<run>.pt (finetune_wsi_titan_pruned.py). "
+        help="Repeatable: a WSI-EAF Stage-2 best_<run>.pt (distill_wsi_titan.py). "
         "Evaluated in addition to the always-included frozen baseline.",
     )
     parser.add_argument("--min-slides", type=int, default=20, help="Skip a task if fewer labeled+cached slides are found")
@@ -332,8 +332,8 @@ def main() -> int:
         print("nothing to evaluate -- no <cohort>/labels/*.csv found yet (expected while EAGLE downloads are in progress)")
         return 0
 
-    if args.pruned_checkpoint and args.tile_eaf_root is None:
-        raise SystemExit("--tile-eaf-root is required when --pruned-checkpoint is given")
+    if args.pruned_checkpoint and args.tile_input_root is None:
+        raise SystemExit("--tile-input-root is required when --pruned-checkpoint is given")
 
     models: list[tuple[str, object]] = [("baseline", None)]
     for ckpt in args.pruned_checkpoint:
@@ -353,12 +353,12 @@ def main() -> int:
         for model_name, student in models:
             if student is None:
                 embed_fn = _baseline_embedding
-                cache_root = args.wsi_eaf_root
+                cache_root = args.teacher_wsi_root
             else:
                 embed_fn = lambda cohort_dir, slide_id, _s=student: _pruned_embedding(
                     cohort_dir, slide_id, student=_s, device=device
                 )
-                cache_root = args.tile_eaf_root
+                cache_root = args.tile_input_root
 
             X, y, groups, keys, n_found, n_missing = collect_embeddings(
                 task, cache_root=cache_root, embed_fn=embed_fn, min_slides=args.min_slides

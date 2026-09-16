@@ -1,60 +1,76 @@
 # EAF
 
-EAF trains lightweight attention forecasters for pathology foundation models.
-The repository contains code only. WSI, caches, checkpoints and results live
-under `$EAF_WSI_ROOT`.
+This repository now contains one paper-driven pipeline only: train EAF without
+downstream labels on HISTAI, distill pruned tile/WSI encoders to reproduce their
+unpruned embeddings, and evaluate frozen representations on THUNDER and the public
+WSI tasks used by EAGLE.
 
-## Start here
+## Scientific pipeline
+
+```text
+HISTAI WSI (unlabeled)
+  |
+  +-- full tile teacher cache
+  |     |
+  |     +-- train Tile-EAF: early patch tokens -> final teacher attention
+  |     |
+  |     +-- distill pruned tile encoder -> full tile embedding
+  |             |
+  |             +-- pruned tile-input cache
+  |
+  +-- full TITAN teacher cache ------------------------------+
+  |                                                         |
+  +-- TITAN source cache built from pruned tile inputs      |
+        |                                                    |
+        +-- train WSI-EAF: intermediate TITAN state          |
+        |                 -> FULL teacher attention           |
+        |                                                    |
+        +-- distill pruned TITAN + pruned tile inputs -------+
+                           -> FULL teacher slide embedding
+```
+
+The separation between `source_wsi_root` and `teacher_wsi_root` is an invariant:
+WSI-EAF may observe hidden states produced from pruned tile inputs, but its target
+remains the full pipeline. This prevents accidental pruned-to-pruned distillation.
+
+## Supported entry points
+
+Data/cache operations:
 
 ```bash
-conda create -n trident --file environment.yml
-conda activate trident
-export EAF_WSI_ROOT=/path/to/WSI
-
-python scripts/eaf.py layout --data-root "$EAF_WSI_ROOT"
-python scripts/eaf.py data build-strict --data-root "$EAF_WSI_ROOT"
+python scripts/eaf.py data plan-histai --data-root "$EAF_WSI_ROOT"
+python scripts/eaf.py data download-histai --data-root "$EAF_WSI_ROOT"
 python scripts/eaf.py cache tile --help
 ```
 
-The operational commands are deliberately few:
+Training:
 
-| Goal | Command |
-| --- | --- |
-| Inspect data layout | `python scripts/eaf.py layout` |
-| Acquire or register data | `python scripts/eaf.py data ...` |
-| Build or validate Tile-EAF caches | `python scripts/eaf.py cache tile` / `cache validate` |
-| Convert historical derived data | `python scripts/eaf.py cache convert-numpy --scope caches` |
-| Build a strict cache index | `python scripts/eaf.py cache index-tile` |
-| Audit prior experiments | `python scripts/eaf.py experiments audit` |
-| Check raw-data release conditions | `python scripts/eaf.py archive lifecycle` |
-
-New numerical artifacts use `.npyd` directories: memory-mappable `.npy`
-arrays and `metadata.json`. Historical HDF5 remains readable during migration.
-Raw WSI stay in their original pyramidal format under `sources/`.
-
-Read [data layout](docs/data_layout.md) before changing data,
-[pipeline](docs/pipeline.md) before running an experiment, and
-[project status](docs/continuity.md) before continuing experimental work.
-
-For the paper experiment program, start with the
-[experimental roadmap](docs/experimental_roadmap.md): verified run status,
-planned Tile/WSI foundation models, EAGLE coverage and biomedical experiments.
-The [scientific protocols](docs/experimental_protocols.md) and
-[execution/implementation runbook](docs/experimental_runbook.md) distinguish
-available commands from work that still needs implementation.
-
-## Script layout
-
-`eaf.py` is the supported operational CLI. Specialized entry points are grouped
-by purpose: `data/` for acquisition and manifests, `features/` for preprocessing
-and feature stores, `training/` for fitting and distillation, `evaluation/` for
-benchmarks, and `analysis/` for offline inspection.
-
-## Tests
-
-```bash
-pytest
+```text
+scripts/training/train_tile_eaf.py
+scripts/training/distill_tile_encoder.py
+scripts/training/train_wsi_eaf.py
+scripts/training/distill_wsi_titan.py
 ```
 
-Use focused tests while iterating; optional heavy packages are skipped when
-unavailable. Runtime artifacts must never be committed.
+Teacher/source cache creation:
+
+```text
+scripts/features/cache_wsi_teacher.py
+```
+
+Evaluation:
+
+```text
+scripts/evaluation/evaluate_tile_thunder.py
+scripts/evaluation/evaluate_wsi_eagle.py
+```
+
+Read `docs/pipeline.md` for the exact cache contracts and launch order.
+
+## Scope
+
+Historical pruning baselines, supervised THUNDER pretraining, TCGA/HEST/GTEx EAF
+pretraining, morphology coarsening, attention-signal discovery, and experimental
+side pipelines were intentionally removed. The optional "HISTAI + biological"
+experiment must be added as a new, explicit corpus extension rather than reviving
+those historical pipelines.

@@ -2,7 +2,7 @@
 """Fetch TCGA labels for the EAGLE benchmark replication (Phase D) from the
 public cBioPortal REST API (no auth) and write them in the
 <labels-root>/<cohort>/labels/<task>.csv format (slide_id,label) that
-scripts/evaluation/eval_wsi_linear_probing.py's discover_tasks() expects.
+scripts/evaluation/evaluate_wsi_eagle.py's discover_tasks() expects.
 
 Scope: core metadata via API; the benchmark workflow is in docs/pipeline.md -- clinical/
 mutation attributes exposed as structured cBioPortal fields only. Tasks whose
@@ -26,7 +26,7 @@ import requests
 API = "https://www.cbioportal.org/api"
 EAF_WSI_ROOT = Path("/data2/home/vcivale/projects/imaging/data/WSI")
 TCGA_MANIFESTS = EAF_WSI_ROOT / "datasets/downstream/wsi_level/eagle_tcga_v1/manifests"
-# eval_wsi_linear_probing.py's discover_tasks() scans
+# evaluate_wsi_eagle.py's discover_tasks() scans
 # <labels-root>/<cohort>/labels/*.csv directly under the default labels-root
 # (<data-root>/datasets/downstream/wsi_level) -- cohort dirs go straight
 # there, not nested under eagle_tcga_v1/.

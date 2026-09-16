@@ -73,7 +73,7 @@ def _run_epoch(
             # final embedding for this exact tile, computed once at cache-build
             # time. Reusing it here skips a second full-depth forward pass through
             # the (unpruned) backbone every step, which is otherwise the dominant
-            # extra cost of this trainer vs. train_wsi_tile_eaf_online.py.
+            # extra cost of this trainer vs. train_tile_eaf.py.
             teacher_embedding = cached_target.to(device, non_blocking=True).float()
         else:
             with torch.no_grad(), _autocast(device, amp_dtype):
@@ -356,7 +356,7 @@ def main() -> None:
         # size -> model transform, whose own Resize step then becomes a same-size
         # no-op) -- otherwise the pixels fed to the student's forward wouldn't match
         # what the cached tile_embeddings target was actually computed from. See the
-        # identical rationale in train_wsi_tile_eaf_online.py.
+        # identical rationale in train_tile_eaf.py.
         loader_kwargs["resize_to"] = adapter.input_size
         loader_kwargs["target_key"] = "tile_embeddings"
     train_loader, val_loader, train_sampler, val_sampler = loader_builder(
@@ -383,7 +383,7 @@ def main() -> None:
     )
 
     # <tile-encoder>_src<NN>_pruned<keep%>pct -- same base naming convention as
-    # train_wsi_tile_eaf_online.py (prune_layer plays the role of source_layer
+    # train_tile_eaf.py (prune_layer plays the role of source_layer
     # here), plus the keep-ratio that distinguishes the 30/20/10% variants.
     run_name = args.run_name or (
         f"{tile_encoder_dir_name(args.model_name)}_src{args.prune_layer:02d}"

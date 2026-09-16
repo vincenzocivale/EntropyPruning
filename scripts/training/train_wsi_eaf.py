@@ -7,11 +7,7 @@ caches) -- no tile-encoder or WSI-FM forward pass runs here, only the small
 forecaster itself. See `src/models/wsi/dense_forecaster.py` for why this uses
 standard dense self-attention (mirroring TITAN's own proven-stable block
 design at smaller scale) rather than the earlier landmark-bottleneck
-architecture, and the WSI-EAF attention-signal investigation notes for why
-final-layer embeddings (not early-layer) and learned weights (not raw content
-similarity) are both required ingredients.
-
-Loss/metric design mirrors `scripts/training/train_wsi_tile_eaf_online.py` (KL +
+architecture, and the Loss/metric design mirrors `scripts/training/train_tile_eaf.py` (KL +
 rank-alignment, Spearman rho, top-k recall) for consistency across the two
 EAF forecaster training scripts in this repo.
 """
@@ -188,13 +184,14 @@ def _run_epoch(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tile-eaf-root", type=Path, required=True)
-    parser.add_argument("--wsi-eaf-root", type=Path, required=True)
+    parser.add_argument("--tile-input-root", type=Path, required=True, help="Tile embeddings used by the WSI student; final runs use the distilled Tile-EAF-pruned encoder cache")
+    parser.add_argument("--source-wsi-root", type=Path, required=True, help="WSI cache built from --tile-input-root; intermediate hidden states are read here")
+    parser.add_argument("--teacher-wsi-root", type=Path, required=True, help="Frozen full WSI teacher cache built from the unpruned tile encoder; attention targets are read here")
     parser.add_argument(
         "--tile-encoder", required=True,
         help="Tile encoder that produced --tile-eaf-root's cache, e.g. conch_v15 -- used for "
         "the default run-name/checkpoint-dir naming (<tile-encoder>__<wsi-encoder>_src<NN>), "
-        "same convention as scripts/training/train_wsi_tile_eaf_online.py.",
+        "same convention as scripts/training/train_tile_eaf.py.",
     )
     parser.add_argument(
         "--wsi-encoder", default="titan",
@@ -217,7 +214,7 @@ def main() -> int:
         help=(
             "HISTAI subsets to exclude (default: the two largest/slowest-to-download "
             "subsets, HISTAI-mixed and HISTAI-skin-b2, same default as "
-            "train_wsi_tile_eaf_online.py -- pass --exclude-cohort with no values to "
+            "train_tile_eaf.py -- pass --exclude-cohort with no values to "
             "include everything)"
         ),
     )
@@ -225,7 +222,7 @@ def main() -> int:
     parser.add_argument("--target-layer", type=int, default=-1, help="-1 = TITAN's real final layer")
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
-    parser.add_argument("--split-seed", type=int, default=17, help="matches the correlational-analysis splits")
+    parser.add_argument("--split-seed", type=int, default=17, help="case-disjoint HISTAI split seed")
 
     parser.add_argument(
         "--input-source", choices=("tile_embeddings", "titan_hidden"), default="tile_embeddings",
@@ -233,7 +230,7 @@ def main() -> int:
             "tile_embeddings: the tile encoder's context-free final embeddings (original "
             "behavior). titan_hidden: TITAN's own intermediate hidden state at "
             "--titan-hidden-layer (auxiliary/hidden_layer_{k:03d} in the wsi_eaf output "
-            "file, see wsi_eaf_infer_wsi_fm.py --titan-hidden-layer); requires --architecture "
+            "file, see cache_wsi_teacher.py --titan-hidden-layer); requires --architecture "
             "dense_alibi (a plain forecaster has no way to use TITAN's own ALiBi-contextualized "
             "features correctly without the matching spatial bias)."
         ),
@@ -301,7 +298,7 @@ def main() -> int:
         "--early-stopping-patience", type=int, default=6,
         help="Stop after this many consecutive epochs without a val_rho improvement of at least "
         "--early-stopping-min-delta (0 disables early stopping). Same default/semantics as "
-        "train_wsi_tile_eaf_online.py.",
+        "train_tile_eaf.py.",
     )
     parser.add_argument("--early-stopping-min-delta", type=float, default=1e-4)
 
@@ -338,7 +335,7 @@ def main() -> int:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Run/checkpoint naming mirrors scripts/training/train_wsi_tile_eaf_online.py: one
+    # Run/checkpoint naming mirrors scripts/training/train_tile_eaf.py: one
     # subdirectory per run under $EAF_WSI_ROOT/checkpoints/wsi_eaf/<pair>/, named
     # deterministically from the source layer (or "srcfinal" for the original
     # context-free tile_embeddings input) and the tile-input variant.
@@ -354,8 +351,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_config = WSIForecasterManifestConfig(
-        tile_eaf_root=args.tile_eaf_root,
-        wsi_eaf_root=args.wsi_eaf_root,
+        tile_input_root=args.tile_input_root,
+        source_wsi_root=args.source_wsi_root,
+        teacher_wsi_root=args.teacher_wsi_root,
         attention_key=args.attention_key,
         target_layer=args.target_layer,
         cohorts=tuple(args.cohorts) if args.cohorts else None,
@@ -423,7 +421,7 @@ def main() -> int:
         dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    # Matches scripts/training/train_wsi_tile_eaf_online.py's convention: a smoothly decaying
+    # Matches scripts/training/train_tile_eaf.py's convention: a smoothly decaying
     # LR reduces how large a late-training update can be, which is cheap insurance
     # against the kind of training-time instability the landmark architecture hit.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)

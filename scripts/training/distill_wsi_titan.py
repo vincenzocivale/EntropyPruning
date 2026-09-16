@@ -2,15 +2,15 @@
 """LoRA-adapt TITAN's own vision-encoder blocks to recover accuracy lost from
 forecaster-guided tile pruning, distilling against the *cached* frozen-TITAN
 slide embedding (no unpruned TITAN forward pass at training time -- the teacher
-signal was already computed once, offline, by `scripts/features/wsi_eaf_infer_wsi_fm.py`
+signal was already computed once, offline, by `scripts/features/cache_wsi_teacher.py`
 and lives in `slide_embedding` inside the wsi_eaf output files).
 
-Mirrors `scripts/training/finetune_wsi_tile_encoder_pruned_online.py` (task-agnostic
+Mirrors `scripts/training/distill_tile_encoder.py` (task-agnostic
 full-vs-pruned embedding distillation for the *tile encoder*), one level up:
 here it is TITAN's own tile bag being pruned mid-forward
 (`src/models/wsi/pruned_titan.py::PrunedLoRATitanEncoder`), using a frozen
 WSI-EAF forecaster trained at the same `--prune-layer`
-(`scripts/training/train_wsi_landmark_forecaster.py --input-source titan_hidden
+(`scripts/training/train_wsi_eaf.py --input-source titan_hidden
 --titan-hidden-layer <prune-layer>`).
 """
 
@@ -110,7 +110,7 @@ def _run_epoch(
             if train:
                 (loss / slides_per_step).backward()
         except torch.cuda.OutOfMemoryError as exc:
-            # Same rationale as train_wsi_landmark_forecaster.py's oom-skip: a handful
+            # Same rationale as train_wsi_eaf.py's oom-skip: a handful
             # of extreme-tile-count slides can still spike memory even after pruning
             # (the un-prunable prefix, blocks[:prune_layer+1], still runs on the FULL
             # bag) -- skip rather than lose the whole run to one slide.
@@ -175,8 +175,8 @@ def _run_epoch(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tile-eaf-root", type=Path, required=True)
-    parser.add_argument("--wsi-eaf-root", type=Path, required=True)
+    parser.add_argument("--tile-input-root", type=Path, required=True, help="Tile embeddings from the distilled Tile-EAF-pruned encoder")
+    parser.add_argument("--teacher-wsi-root", type=Path, required=True, help="Full TITAN teacher cache built from full tile embeddings")
     parser.add_argument("--forecaster-checkpoint", type=Path, required=True)
     parser.add_argument("--prune-layer", type=int, default=None, help="defaults to the forecaster's own trained source layer")
     parser.add_argument("--keep-ratio", type=float, required=True)
@@ -190,7 +190,7 @@ def main() -> int:
         "--tile-input-variant", default="base",
         help="Tag identifying the tile-encoder input this run distills against: 'base' (frozen "
         "tile-encoder cache) or the tile-EAF pruned run name if --tile-eaf-root/--wsi-eaf-root "
-        "point at a pruned-input cache. Folded into the run name.",
+        "identify the pruned tile-input cache. Folded into the run name.",
     )
     parser.add_argument(
         "--output-dir", type=Path, default=None,
@@ -202,7 +202,7 @@ def main() -> int:
         help=(
             "HISTAI subsets to exclude (default: the two largest/slowest-to-download "
             "subsets, HISTAI-mixed and HISTAI-skin-b2, same default as "
-            "train_wsi_tile_eaf_online.py -- pass --exclude-cohort with no values to "
+            "train_tile_eaf.py -- pass --exclude-cohort with no values to "
             "include everything)"
         ),
     )
@@ -256,7 +256,7 @@ def main() -> int:
         "--early-stopping-patience", type=int, default=6,
         help="Stop after this many consecutive epochs without a val_loss improvement of at least "
         "--early-stopping-min-delta (0 disables early stopping). Same default/semantics as "
-        "finetune_wsi_tile_encoder_pruned_online.py.",
+        "distill_tile_encoder.py.",
     )
     parser.add_argument("--early-stopping-min-delta", type=float, default=1e-4)
 
@@ -278,8 +278,8 @@ def main() -> int:
             "shown any other layer's hidden state and its scores would be meaningless here."
         )
 
-    # Run/checkpoint naming mirrors scripts/training/train_wsi_landmark_forecaster.py /
-    # train_wsi_tile_eaf_online.py: one subdirectory per run under
+    # Run/checkpoint naming mirrors scripts/training/train_wsi_eaf.py /
+    # train_tile_eaf.py: one subdirectory per run under
     # $EAF_WSI_ROOT/checkpoints/wsi_eaf_pruned/<pair>/.
     pair = wsi_encoder_pair_dir_name(args.tile_encoder, args.wsi_encoder)
     variant_tag = "" if args.tile_input_variant == "base" else f"__{args.tile_input_variant}"
@@ -292,8 +292,8 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_config = WSIForecasterManifestConfig(
-        tile_eaf_root=args.tile_eaf_root,
-        wsi_eaf_root=args.wsi_eaf_root,
+        tile_input_root=args.tile_input_root,
+        teacher_wsi_root=args.teacher_wsi_root,
         cohorts=tuple(args.cohorts) if args.cohorts else None,
         exclude_cohorts=tuple(args.exclude_cohort) if args.exclude_cohort else None,
     )

@@ -1,14 +1,7 @@
 """WSI-EAF dense-attention forecaster: standard multi-head self-attention over
 the whole tile bag, mirroring TITAN's own block design at a smaller scale.
 
-Replaces the earlier `WSILandmarkForecaster` (ISAB/landmark-bottleneck design,
-see `landmark_forecaster.py`), which turned out to have a self-inflicted
-instability class: its 128 learned landmark tokens started numerically
-identical to each other (a symmetric initialization), which either collapsed
-permanently (small init) or, once escaped via a large init, could grow
-unboundedly during training (nothing renormalized them), producing grad_norm
-spikes into the hundreds of thousands and stalling training indefinitely on
-the full corpus despite working fine on every smaller-scale check.
+The implementation intentionally uses standard dense self-attention to mirror the WSI teacher block structure.
 
 Standard dense self-attention has no equivalent failure mode: the "queries"
 are the tiles themselves, which are never identical to begin with (they come
