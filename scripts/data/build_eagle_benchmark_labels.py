@@ -106,7 +106,26 @@ def main() -> int:
         patients = set(slide_to_patient.values())
         print(f"  {len(slide_to_patient)} audited slides, {len(patients)} patients")
 
-        clinical = fetch_clinical(study, ["MSI_SENSOR_SCORE", "PATH_M_STAGE", "PATH_N_STAGE"])
+        clinical = fetch_clinical(
+            study, ["MSI_SENSOR_SCORE", "PATH_M_STAGE", "PATH_N_STAGE", "ICD_O_3_SITE"]
+        )
+
+        # Sidedness (CRC): ICD-O-3 site C18.0-C18.4 = right colon (cecum through
+        # hepatic flexure), C18.5-C18.7 = left colon (splenic flexure through
+        # sigmoid), C19-C20 = rectum -- excluded, sidedness is a colon-only concept.
+        if project in ("TCGA-COAD", "TCGA-READ"):
+            sidedness = {}
+            for slide_id, pid in slide_to_patient.items():
+                site = clinical.get(pid, {}).get("ICD_O_3_SITE", "")
+                if not site.startswith("C18"):
+                    continue
+                try:
+                    subsite = float(site[1:])
+                except ValueError:
+                    continue
+                sidedness[slide_id] = 0 if subsite <= 18.4 else 1
+            if sidedness:
+                write_task(project, "sidedness", sidedness)
 
         # MSI status (binary), CRC + STAD
         if project in ("TCGA-COAD", "TCGA-READ", "TCGA-STAD"):

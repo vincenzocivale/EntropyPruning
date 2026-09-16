@@ -121,9 +121,40 @@ Pannello candidato da congelare dopo audit label, senza guardare performance:
 | Stomaco | Lauren, EBV, MSI, TP53, N, M |
 
 Il mapping effettivo deve distinguere endpoint da coppia endpoint/coorte.
-ER/PR/HER2, EBV/Lauren e CIMP non si ricavano automaticamente dagli script
-attuali. Un endpoint senza test pubblico compatibile resta interno oppure
-non riproducibile; non assegnare a TCGA-STAD un test CPTAC di un altro organo.
+Un endpoint senza test pubblico compatibile resta interno oppure non
+riproducibile; non assegnare a TCGA-STAD un test CPTAC di un altro organo.
+
+Copertura effettiva locale, audit 2026-09-16 (`scripts/data/build_eagle_benchmark_labels.py`
+per TCGA, cBioPortal `coadread_tcga_pan_can_atlas_2018`; `pathobench_v1/splits/` per il resto):
+
+| Dominio | Endpoint | TCGA (dev) | CPTAC (test) | Stato |
+| --- | --- | --- | --- | --- |
+| CRC | MSI | COAD/READ `msi_status` | `cptac_coad/MSI_H` | replica |
+| CRC | BRAF | COAD/READ `braf_mutation` | — | replica (solo dev) |
+| CRC | KRAS | COAD/READ `kras_mutation` | `cptac_coad/KRAS_mutation` | replica |
+| CRC | sidedness | COAD/READ `sidedness` (derivato da `ICD_O_3_SITE`, risolto 2026-09-16) | — | adattamento_pubblico |
+| CRC | N, M | COAD/READ `n_status`/`m_status` | — | replica (solo dev) |
+| CRC | CIMP | — | — | non_riproducibile: nessuna fonte strutturata pubblica |
+| Polmone | LUAD/LUSC subtype | `nsclc_subtyping` | — | replica |
+| Polmone | EGFR | LUAD/LUSC `egfr_mutation` | `cptac_luad/EGFR_mutation` | replica |
+| Polmone | STK11 | LUAD/LUSC `stk11_mutation` | `cptac_luad/STK11_mutation` | replica |
+| Polmone | TP53 | LUAD/LUSC `tp53_mutation` | `cptac_luad/TP53_mutation` | replica |
+| Polmone | KRAS | — (fuori scope dev) | `cptac_luad/KRAS_mutation` | replica (solo test) |
+| Polmone | N, M | LUAD/LUSC `n_status`/`m_status` | — | replica (solo dev) |
+| Mammella | PIK3CA | BRCA `pik3ca_mutation` | `cptac_brca/PIK3CA_mutation` | replica |
+| Mammella | TP53 | — (fuori scope dev) | `cptac_brca/TP53_mutation` | replica (solo test) |
+| Mammella | ER, PR, HER2 | — (non in PanCanAtlas clinical fields) | `bcnb/{er,pr,her2}`, `bc_therapy/{er_status,her2_status}` | adattamento_pubblico (coorte non-TCGA/CPTAC) |
+| Mammella | N, M | BRCA `n_status`/`m_status` | — | replica (solo dev) |
+| Stomaco | MSI | STAD `msi_status` | — | replica (solo dev) |
+| Stomaco | TP53 | STAD `tp53_mutation` | — | replica (solo dev) |
+| Stomaco | N, M | STAD `n_status`/`m_status` | — | replica (solo dev) |
+| Stomaco | Lauren, EBV | — | — | non_riproducibile: solo in tabelle supplementari del paper, fuori scope API |
+
+Verificato anche il pannello E02 (survival/trattamento): tutti e 12 gli endpoint
+del piano (BOEHMK/PFS, SURGEN/OS via alias `sr386_`, CPTAC-LUAD/HNSC/PDA/CCRCC
+OS, MBC OS+RECIST, SURGEN mortalità 5 anni, POST-NAT-BRCA invasione
+linfovascolare, NADT-Prostate risposta, OV-Bevacizumab risposta) sono presenti
+in `pathobench_v1/splits/`; copertura 12/12.
 
 Cinque partizioni di sviluppo TCGA, training/validation disgiunti per paziente;
 test CPTAC intatto. Head MLP del protocollo EAGLE e linear probe controllato;
