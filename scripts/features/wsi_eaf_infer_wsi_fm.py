@@ -9,7 +9,7 @@ Bridges two schemas that currently don't talk to each other in this repo:
   ``src/wsi_pipeline/cache_contracts.py`` / ``cache_io.TileCacheWriter``),
   produced by ``python scripts/eaf.py cache tile``.
 - Output: ``eaf.wsi.fm_output.v1`` (``src/wsi_pipeline/io.py``), the schema
-  ``scripts/wsi_extract_fm_outputs.py`` already writes.
+  ``scripts/features/wsi_extract_fm_outputs.py`` already writes.
 
 This script reads tile embeddings straight from the current
 Tile-EAF cache, run them through the same ``WSIModelAdapter`` implementations
@@ -35,7 +35,7 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 import sys  # noqa: E402
 
 if str(REPO_ROOT) not in sys.path:

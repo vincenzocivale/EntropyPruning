@@ -93,7 +93,7 @@ class HookedViTTileTeacherAdapter:
     Captures, in one forward pass per image batch, exactly the three quantities the
     offline Tile-EAF/WSI-EAF cache needs, with semantics pinned to match
     ``src.models.online_tile_eaf.OnlineAttentionTeacher`` (the teacher actually driving
-    the live online Tile-EAF trainer, ``scripts/train_wsi_tile_eaf_online.py``) bit for
+    the live online Tile-EAF trainer, ``scripts/training/train_wsi_tile_eaf_online.py``) bit for
     bit, not merely "a" reasonable early-layer/attention definition:
 
     - ``early_tokens``: the **output of transformer block ``early_layer`` itself**
@@ -241,8 +241,8 @@ class HookedViTTileTeacherAdapter:
 
         Mirrors exactly how the online trainer/pruner load a teacher
         (``ThunderBackboneAdapter`` wrapping the same ``get_model_from_name`` call in
-        ``scripts/train_wsi_tile_eaf_online.py`` /
-        ``scripts/finetune_wsi_tile_encoder_pruned_online.py``), so the offline cache
+        ``scripts/training/train_wsi_tile_eaf_online.py`` /
+        ``scripts/training/finetune_wsi_tile_encoder_pruned_online.py``), so the offline cache
         and the online training code always agree on which weights back a given
         ``--encoder``/``--model-name`` value. CONCH v1.5 keeps its dedicated
         ``from_conch()`` accessor (TITAN's ``return_conch()``, numerically validated
@@ -457,7 +457,7 @@ class HookedViTTileTeacherAdapter:
 
 class PrunedLoRATileTeacherAdapter:
     """Tile teacher backed by a tile-EAF pruned+LoRA-fine-tuned encoder (a Stage-2
-    checkpoint from ``scripts/finetune_wsi_tile_encoder_pruned_online.py``), instead
+    checkpoint from ``scripts/training/finetune_wsi_tile_encoder_pruned_online.py``), instead
     of the frozen base encoder ``HookedViTTileTeacherAdapter`` wraps directly.
 
     ``tile_embeddings`` come from the real forecaster-guided-pruned + LoRA forward
@@ -478,7 +478,7 @@ class PrunedLoRATileTeacherAdapter:
     ``forecaster_checkpoint`` (the same fields
     ``finetune_wsi_tile_encoder_pruned_online.py`` writes) -- mirroring the
     auto-resolve-from-checkpoint pattern in
-    ``scripts/train_multi_thunder_classifier.py``'s ``--pruned-adapter-ckpt`` path.
+    ``scripts/training/train_multi_thunder_classifier.py``'s ``--pruned-adapter-ckpt`` path.
     """
 
     def __init__(

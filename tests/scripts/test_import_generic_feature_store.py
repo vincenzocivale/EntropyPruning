@@ -63,7 +63,7 @@ def test_import_generic_feature_store_cli_imports_pt_npy_and_npz(tmp_path) -> No
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -129,7 +129,7 @@ def test_import_generic_feature_store_cli_supports_explicit_keys(tmp_path) -> No
     subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -175,7 +175,7 @@ def test_import_generic_feature_store_cli_rejects_feature_dim_mismatch(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -215,7 +215,7 @@ def test_import_generic_feature_store_cli_rejects_coords_length_mismatch(tmp_pat
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -254,7 +254,7 @@ def test_import_generic_feature_store_cli_refuses_overwrite_by_default(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -292,7 +292,7 @@ def test_import_generic_feature_store_cli_output_passes_validator(tmp_path) -> N
     import_result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_generic_feature_store.py",
+            "scripts/features/import_generic_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -309,7 +309,7 @@ def test_import_generic_feature_store_cli_output_passes_validator(tmp_path) -> N
     validate_result = subprocess.run(
         [
             sys.executable,
-            "scripts/validate_wsi_feature_store.py",
+            "scripts/features/validate_wsi_feature_store.py",
             "--feature-store",
             str(output_path),
             "--feature-dim",

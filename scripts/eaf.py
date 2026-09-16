@@ -531,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Tile encoder to cache. 'conch_v15' uses TITAN's return_conch() accessor; "
             "any other name (e.g. uni2h, virchow2, hoptimus1, provgigapath) is loaded "
             "via THUNDER's model registry (thunder.models.pretrained_models."
-            "get_model_from_name), the same path scripts/train_wsi_tile_eaf_online.py "
+            "get_model_from_name), the same path scripts/training/train_wsi_tile_eaf_online.py "
             "and finetune_wsi_tile_encoder_pruned_online.py use for --model-name."
         ),
     )

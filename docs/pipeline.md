@@ -6,7 +6,7 @@ Use `python scripts/eaf.py data ...` to register or acquire sources and build a
 strict pretraining manifest. TRIDENT supplies segmentation and coordinates:
 
 ```bash
-python scripts/wsi_preprocess.py \
+python scripts/features/wsi_preprocess.py \
   --trident-repo /path/to/TRIDENT --wsi-dir /path/to/wsis --job-dir /path/to/job
 ```
 
@@ -32,12 +32,12 @@ The cache writer publishes only complete, validated slides.
 Use the explicit scripts for the three learning stages:
 
 ```text
-scripts/train_wsi_tile_eaf_online.py              Tile-EAF forecaster
-scripts/finetune_wsi_tile_encoder_pruned_online.py tile encoder distillation
-scripts/wsi_eaf_infer_wsi_fm.py                   WSI-FM output cache
-scripts/train_wsi_landmark_forecaster.py          WSI-EAF forecaster
-scripts/finetune_wsi_titan_pruned.py              WSI distillation
-scripts/eval_wsi_linear_probing.py                paired downstream evaluation
+scripts/training/train_wsi_tile_eaf_online.py              Tile-EAF forecaster
+scripts/training/finetune_wsi_tile_encoder_pruned_online.py tile encoder distillation
+scripts/features/wsi_eaf_infer_wsi_fm.py                   WSI-FM output cache
+scripts/training/train_wsi_landmark_forecaster.py          WSI-EAF forecaster
+scripts/training/finetune_wsi_titan_pruned.py              WSI distillation
+scripts/evaluation/eval_wsi_linear_probing.py                paired downstream evaluation
 ```
 
 Each new run writes a compact summary below `$EAF_WSI_ROOT/results/`, alongside
@@ -53,6 +53,8 @@ The audit writes `results/experiment_catalog/catalog.json`. It reports complete,
 partial and non-comparable runs from verified artifacts. Before an optimization
 or model sweep, capture a profile with the same data and parameters, change one
 factor, then profile again.
+
+[Project status and handoff](continuity.md) records the verified experiment inventory and the next work sequence.
 
 ## Current scope
 

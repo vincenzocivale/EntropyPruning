@@ -2,7 +2,7 @@
 """Fetch TCGA labels for the EAGLE benchmark replication (Phase D) from the
 public cBioPortal REST API (no auth) and write them in the
 <labels-root>/<cohort>/labels/<task>.csv format (slide_id,label) that
-scripts/eval_wsi_linear_probing.py's discover_tasks() expects.
+scripts/evaluation/eval_wsi_linear_probing.py's discover_tasks() expects.
 
 Scope: core metadata via API; the benchmark workflow is in docs/pipeline.md -- clinical/
 mutation attributes exposed as structured cBioPortal fields only. Tasks whose

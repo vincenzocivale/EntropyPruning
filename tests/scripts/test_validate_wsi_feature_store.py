@@ -35,7 +35,7 @@ def _make_bag(
 
 def _run_validator(*args: str, repo_root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "scripts/validate_wsi_feature_store.py", *args],
+        [sys.executable, "scripts/features/validate_wsi_feature_store.py", *args],
         cwd=repo_root,
         capture_output=True,
         text=True,

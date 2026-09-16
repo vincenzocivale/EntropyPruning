@@ -6,7 +6,7 @@ import json
 import numpy as np
 import torch
 
-from scripts.analyze_wsi_attention_embeddings import main
+from scripts.analysis.analyze_wsi_attention_embeddings import main
 from src.data.wsi.bag import WSIBag
 from src.data.wsi.h5_feature_store import H5WSIFeatureStore
 

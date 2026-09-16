@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup
 import wandb
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from thunder.models.pretrained_models import get_model_from_name
 

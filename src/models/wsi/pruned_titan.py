@@ -109,7 +109,7 @@ class PrunedLoRATitanEncoder(nn.Module):
     """LoRA-adapted TITAN vision encoder with forecaster-guided tile pruning.
 
     Distillation target is always the *cached* frozen-TITAN slide embedding
-    (already written by ``scripts/wsi_eaf_infer_wsi_fm.py`` into the wsi_eaf
+    (already written by ``scripts/features/wsi_eaf_infer_wsi_fm.py`` into the wsi_eaf
     cache's ``slide_embedding`` for every slide) -- unlike the tile-encoder
     case, there is no need to ever run a second, unpruned forward through
     TITAN during training; the frozen teacher output was already computed

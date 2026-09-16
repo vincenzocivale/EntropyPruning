@@ -2,15 +2,15 @@
 """LoRA-adapt TITAN's own vision-encoder blocks to recover accuracy lost from
 forecaster-guided tile pruning, distilling against the *cached* frozen-TITAN
 slide embedding (no unpruned TITAN forward pass at training time -- the teacher
-signal was already computed once, offline, by `scripts/wsi_eaf_infer_wsi_fm.py`
+signal was already computed once, offline, by `scripts/features/wsi_eaf_infer_wsi_fm.py`
 and lives in `slide_embedding` inside the wsi_eaf output files).
 
-Mirrors `scripts/finetune_wsi_tile_encoder_pruned_online.py` (task-agnostic
+Mirrors `scripts/training/finetune_wsi_tile_encoder_pruned_online.py` (task-agnostic
 full-vs-pruned embedding distillation for the *tile encoder*), one level up:
 here it is TITAN's own tile bag being pruned mid-forward
 (`src/models/wsi/pruned_titan.py::PrunedLoRATitanEncoder`), using a frozen
 WSI-EAF forecaster trained at the same `--prune-layer`
-(`scripts/train_wsi_landmark_forecaster.py --input-source titan_hidden
+(`scripts/training/train_wsi_landmark_forecaster.py --input-source titan_hidden
 --titan-hidden-layer <prune-layer>`).
 """
 
@@ -28,7 +28,7 @@ import wandb
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data.wsi.wsi_forecaster_dataset import (
     WSIForecasterManifestConfig,
@@ -278,7 +278,7 @@ def main() -> int:
             "shown any other layer's hidden state and its scores would be meaningless here."
         )
 
-    # Run/checkpoint naming mirrors scripts/train_wsi_landmark_forecaster.py /
+    # Run/checkpoint naming mirrors scripts/training/train_wsi_landmark_forecaster.py /
     # train_wsi_tile_eaf_online.py: one subdirectory per run under
     # $EAF_WSI_ROOT/checkpoints/wsi_eaf_pruned/<pair>/.
     pair = wsi_encoder_pair_dir_name(args.tile_encoder, args.wsi_encoder)

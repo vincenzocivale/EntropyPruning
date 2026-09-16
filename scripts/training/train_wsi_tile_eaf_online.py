@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm
 import wandb
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from thunder.models.pretrained_models import get_model_from_name
 from src.data.wsi_tile_stream import build_online_tile_loaders, load_wsi_manifest

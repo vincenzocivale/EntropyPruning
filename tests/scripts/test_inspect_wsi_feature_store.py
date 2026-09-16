@@ -88,7 +88,7 @@ def test_inspect_wsi_feature_store_cli_prints_summary_and_writes_json(tmp_path) 
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/inspect_wsi_feature_store.py",
+            "scripts/features/inspect_wsi_feature_store.py",
             "--feature-store",
             str(store_path),
             "--output-json",
@@ -139,7 +139,7 @@ def test_inspect_wsi_feature_store_cli_handles_empty_store(tmp_path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/inspect_wsi_feature_store.py",
+            "scripts/features/inspect_wsi_feature_store.py",
             "--feature-store",
             str(store_path),
         ],
@@ -163,7 +163,7 @@ def test_inspect_wsi_feature_store_cli_rejects_negative_max_examples(tmp_path) -
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/inspect_wsi_feature_store.py",
+            "scripts/features/inspect_wsi_feature_store.py",
             "--feature-store",
             str(store_path),
             "--max-examples",

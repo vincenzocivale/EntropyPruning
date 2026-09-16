@@ -182,7 +182,7 @@ class WSIForecasterDataset(Dataset):
 
     Bag size N varies per slide (tens to tens of thousands of tiles); batching
     is the training script's responsibility (variable-N bags do not collate
-    naturally -- see `scripts/train_wsi_landmark_forecaster.py`, which uses
+    naturally -- see `scripts/training/train_wsi_landmark_forecaster.py`, which uses
     batch_size=1 with gradient accumulation across slides).
     """
 

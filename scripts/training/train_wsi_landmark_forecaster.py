@@ -11,7 +11,7 @@ architecture, and the WSI-EAF attention-signal investigation notes for why
 final-layer embeddings (not early-layer) and learned weights (not raw content
 similarity) are both required ingredients.
 
-Loss/metric design mirrors `scripts/train_wsi_tile_eaf_online.py` (KL +
+Loss/metric design mirrors `scripts/training/train_wsi_tile_eaf_online.py` (KL +
 rank-alignment, Spearman rho, top-k recall) for consistency across the two
 EAF forecaster training scripts in this repo.
 """
@@ -31,7 +31,7 @@ import wandb
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data.wsi.wsi_forecaster_dataset import (
     WSIForecasterDataset,
@@ -194,7 +194,7 @@ def main() -> int:
         "--tile-encoder", required=True,
         help="Tile encoder that produced --tile-eaf-root's cache, e.g. conch_v15 -- used for "
         "the default run-name/checkpoint-dir naming (<tile-encoder>__<wsi-encoder>_src<NN>), "
-        "same convention as scripts/train_wsi_tile_eaf_online.py.",
+        "same convention as scripts/training/train_wsi_tile_eaf_online.py.",
     )
     parser.add_argument(
         "--wsi-encoder", default="titan",
@@ -338,7 +338,7 @@ def main() -> int:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Run/checkpoint naming mirrors scripts/train_wsi_tile_eaf_online.py: one
+    # Run/checkpoint naming mirrors scripts/training/train_wsi_tile_eaf_online.py: one
     # subdirectory per run under $EAF_WSI_ROOT/checkpoints/wsi_eaf/<pair>/, named
     # deterministically from the source layer (or "srcfinal" for the original
     # context-free tile_embeddings input) and the tile-input variant.
@@ -423,7 +423,7 @@ def main() -> int:
         dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    # Matches scripts/train_wsi_tile_eaf_online.py's convention: a smoothly decaying
+    # Matches scripts/training/train_wsi_tile_eaf_online.py's convention: a smoothly decaying
     # LR reduces how large a late-training update can be, which is cheap insurance
     # against the kind of training-time instability the landmark architecture hit.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)

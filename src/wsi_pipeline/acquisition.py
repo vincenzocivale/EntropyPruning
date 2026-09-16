@@ -506,7 +506,7 @@ def download_gdc(
     if executable is None:
         raise AcquisitionError(
             "gdc-client was not found. Install the official GDC Data Transfer Tool, "
-            "or use scripts/download_gdc_manifest_simple.py with the generated manifest."
+            "or use scripts/data/manage_unlabeled_wsi.py download with the generated plan."
         )
     manifest = plan_path.parent / "gdc_manifest.tsv"
     if not manifest.exists():

@@ -32,8 +32,16 @@ New numerical artifacts use `.npyd` directories: memory-mappable `.npy`
 arrays and `metadata.json`. Historical HDF5 remains readable during migration.
 Raw WSI stay in their original pyramidal format under `sources/`.
 
-Read [data layout](docs/data_layout.md) before changing data, and
-[pipeline](docs/pipeline.md) before running an experiment.
+Read [data layout](docs/data_layout.md) before changing data,
+[pipeline](docs/pipeline.md) before running an experiment, and
+[project status](docs/continuity.md) before continuing experimental work.
+
+## Script layout
+
+`eaf.py` is the supported operational CLI. Specialized entry points are grouped
+by purpose: `data/` for acquisition and manifests, `features/` for preprocessing
+and feature stores, `training/` for fitting and distillation, `evaluation/` for
+benchmarks, and `analysis/` for offline inspection.
 
 ## Tests
 

@@ -3,7 +3,7 @@
 Reads, per slide: the tile encoder's final embeddings + coords (`tile_embeddings`,
 Tile-EAF cache, same as `wsi_forecaster_dataset.py`) as the student's input bag,
 and the frozen, unpruned TITAN slide embedding (`slide_embedding`, wsi_eaf output
-file -- already computed once, offline, by `scripts/wsi_eaf_infer_wsi_fm.py`) as
+file -- already computed once, offline, by `scripts/features/wsi_eaf_infer_wsi_fm.py`) as
 the distillation target. No TITAN forward pass runs to produce the teacher signal
 at training time -- it was already cached for the whole corpus.
 

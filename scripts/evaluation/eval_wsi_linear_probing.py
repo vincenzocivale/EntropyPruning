@@ -3,18 +3,18 @@
 datasets from the configured downstream benchmark bank (see docs/pipeline.md).
 
 Compares the frozen baseline WSI-FM (TITAN) against one or more WSI-EAF
-Stage-2 checkpoints (`scripts/finetune_wsi_titan_pruned.py`,
+Stage-2 checkpoints (`scripts/training/finetune_wsi_titan_pruned.py`,
 `checkpoints/wsi_eaf_pruned/<pair>/<run>/`) by training a plain linear head
 (logistic regression, k-fold cross-validated) on each model's slide
 embeddings for each labeled task. No backbone/forecaster weights are updated
 here -- linear probing only, mirroring the tile-EAF Stage-3 evaluation
-(`scripts/train_multi_thunder_classifier.py --adaptation linear_probing`) one
+(`scripts/training/train_multi_thunder_classifier.py --adaptation linear_probing`) one
 level up.
 
 Two embedding sources per task:
 
 - Baseline (frozen TITAN): read the pre-cached `slide_embedding` straight out
-  of the `eaf.wsi.fm_output.v1` cache (`scripts/wsi_eaf_infer_wsi_fm.py`
+  of the `eaf.wsi.fm_output.v1` cache (`scripts/features/wsi_eaf_infer_wsi_fm.py`
   output, `--wsi-eaf-root`) -- no model forward pass at all.
 - Each `--pruned-checkpoint`: read per-slide `coords`/`tile_embeddings` from
   the matching Tile-EAF cache (`--tile-eaf-root`) and run them live through
@@ -46,7 +46,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.wsi_pipeline.numpy_store import preferred_path, read_array  # noqa: E402
 from src.data.wsi.layout import StoreLayout  # noqa: E402

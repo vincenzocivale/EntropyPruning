@@ -81,7 +81,7 @@ def test_import_trident_feature_store_cli_imports_manifest(tmp_path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -138,7 +138,7 @@ def test_import_trident_feature_store_cli_supports_explicit_dataset_names(tmp_pa
     subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -195,7 +195,7 @@ def test_import_trident_feature_store_cli_squeezes_singleton_multilayer_features
     subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -237,7 +237,7 @@ def test_import_trident_feature_store_cli_rejects_feature_dim_mismatch(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -276,7 +276,7 @@ def test_import_trident_feature_store_cli_refuses_overwrite_by_default(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -317,7 +317,7 @@ def test_import_trident_feature_store_cli_output_passes_validator(tmp_path) -> N
     import_result = subprocess.run(
         [
             sys.executable,
-            "scripts/import_trident_feature_store.py",
+            "scripts/features/import_trident_feature_store.py",
             "--manifest",
             str(manifest_path),
             "--output-feature-store",
@@ -334,7 +334,7 @@ def test_import_trident_feature_store_cli_output_passes_validator(tmp_path) -> N
     validate_result = subprocess.run(
         [
             sys.executable,
-            "scripts/validate_wsi_feature_store.py",
+            "scripts/features/validate_wsi_feature_store.py",
             "--feature-store",
             str(output_path),
             "--feature-dim",

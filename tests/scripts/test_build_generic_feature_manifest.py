@@ -33,7 +33,7 @@ def test_build_generic_feature_manifest_cli_writes_manifest_with_relative_paths(
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--coords-dir",
@@ -75,7 +75,7 @@ def test_build_generic_feature_manifest_cli_supports_absolute_paths(tmp_path) ->
     subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--output-manifest",
@@ -104,7 +104,7 @@ def test_build_generic_feature_manifest_cli_supports_feature_glob(tmp_path) -> N
     subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--feature-glob",
@@ -136,7 +136,7 @@ def test_build_generic_feature_manifest_cli_rejects_missing_required_coords(tmp_
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--coords-dir",
@@ -167,7 +167,7 @@ def test_build_generic_feature_manifest_cli_rejects_missing_required_labels(tmp_
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--labels-csv",
@@ -197,7 +197,7 @@ def test_build_generic_feature_manifest_cli_refuses_overwrite_by_default(tmp_pat
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--output-manifest",
@@ -224,7 +224,7 @@ def test_build_generic_feature_manifest_cli_overwrites_when_requested(tmp_path) 
     subprocess.run(
         [
             sys.executable,
-            "scripts/build_generic_feature_manifest.py",
+            "scripts/features/build_generic_feature_manifest.py",
             "--features-dir",
             str(features_dir),
             "--output-manifest",
