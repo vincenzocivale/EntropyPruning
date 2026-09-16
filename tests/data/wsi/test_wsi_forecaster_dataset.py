@@ -36,9 +36,9 @@ def _write_synthetic_wsi_eaf(path: Path, *, n_tiles: int, hidden_dim: int, layer
     )
 
 
-def _make_dataset(tmp_path: Path, *, hidden_layer: int | None) -> WSIForecasterDataset:
+def _make_dataset(tmp_path: Path, *, hidden_layer: int | None, suffix: str = ".h5") -> WSIForecasterDataset:
     slide_id = "slideA"
-    wsi_eaf_path = tmp_path / f"{slide_id}.h5"
+    wsi_eaf_path = tmp_path / f"{slide_id}{suffix}"
     # The file always only has hidden_layer_000; requesting any other layer must
     # raise cleanly (test_missing_hidden_layer_key_raises_clearly below).
     _write_synthetic_wsi_eaf(wsi_eaf_path, n_tiles=6, hidden_dim=4, layer=0)
@@ -73,6 +73,15 @@ def test_hidden_layer_bag_matches_auxiliary_array(tmp_path: Path) -> None:
     assert features.shape == (6, 4)
     assert coords.shape == (6, 2)
     assert torch.isfinite(features).all()
+    assert torch.isclose(target.sum(), torch.tensor(1.0), atol=1e-5)
+
+
+def test_numpy_hidden_layer_bag_and_attention(tmp_path: Path) -> None:
+    dataset = _make_dataset(tmp_path, hidden_layer=0, suffix=".npyd")
+    features, coords, target, slide_id = dataset[0]
+    assert slide_id == "slideA"
+    assert features.shape == (6, 4)
+    assert coords.shape == (6, 2)
     assert torch.isclose(target.sum(), torch.tensor(1.0), atol=1e-5)
 
 

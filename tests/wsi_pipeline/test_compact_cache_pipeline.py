@@ -393,8 +393,8 @@ def test_multi_slide_cache_pipeline_reuses_one_loader(
     )
     assert [row["status"] for row in rows] == ["built", "built"]
     assert adapter.batch_sizes == [2, 1, 2, 2, 1]
-    assert validate_cache(tmp_path / "cache" / "s0.h5")["n_tiles"] == 3
-    assert validate_cache(tmp_path / "cache" / "s1.h5")["n_tiles"] == 5
+    assert validate_cache(tmp_path / "cache" / "s0.npyd")["n_tiles"] == 3
+    assert validate_cache(tmp_path / "cache" / "s1.npyd")["n_tiles"] == 5
 
 
 def test_shared_loader_failure_falls_back_per_slide(tmp_path: Path, monkeypatch) -> None:
@@ -452,5 +452,5 @@ def test_shared_loader_failure_falls_back_per_slide(tmp_path: Path, monkeypatch)
         ),
     )
     assert [row["status"] for row in rows] == ["built", "built"]
-    assert validate_cache(tmp_path / "cache" / "s0.h5")["n_tiles"] == 2
-    assert validate_cache(tmp_path / "cache" / "s1.h5")["n_tiles"] == 2
+    assert validate_cache(tmp_path / "cache" / "s0.npyd")["n_tiles"] == 2
+    assert validate_cache(tmp_path / "cache" / "s1.npyd")["n_tiles"] == 2

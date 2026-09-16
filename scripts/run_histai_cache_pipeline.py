@@ -23,7 +23,7 @@ Design
   forward, see ``src/wsi_pipeline/compact_cache_dataset.py``. See
   ``src/wsi_pipeline/tile_cache_pipeline.py`` and
   ``src/wsi_pipeline/model_adapters.py::HookedViTTileTeacherAdapter`` for the
-  exact semantics, and ``docs/offline_eaf_pipeline.md`` for the cache schema.
+  exact semantics, and ``docs/pipeline.md`` for the cache schema.
   Every completed cache file is validated with
   ``src.wsi_pipeline.cache_io.validate_cache`` before the subset is marked done.
 
@@ -647,7 +647,7 @@ def run_conch_cache(
     L1-renormalized -- the Tile-EAF teacher target) and ``tile_embeddings`` (shared
     with WSI-EAF) in one forward pass per batch. ``early_tokens`` is intentionally
     NOT part of this permanent cache (storage cost; see
-    ``docs/offline_eaf_pipeline.md``) -- there is no separate "does this exist" flag to detect
+    ``docs/pipeline.md``) -- there is no separate "does this exist" flag to detect
     anymore, so a missing/legacy extractor is now a hard import-time failure, not a
     silent partial cache.
     """
@@ -714,13 +714,13 @@ def run_conch_cache(
     # slides that are missing, partial, corrupt, or stale.
     run_logged(cmd, LOG_ROOT / f"{subset}.conch_v15_cache.log", cwd=REPO)
 
-    h5_files = list(out_dir.glob("*.h5"))
-    if len(h5_files) < len(edf):
+    cache_files = list(out_dir.glob("*.npyd")) + [p for p in out_dir.glob("*.h5") if not p.with_suffix(".npyd").exists()]
+    if len(cache_files) < len(edf):
         raise RuntimeError(
-            f"{subset}: only {len(h5_files)} cache HDF5 for {len(edf)} WSIs"
+            f"{subset}: only {len(cache_files)} caches for {len(edf)} WSIs"
         )
 
-    bad = _validate_cache_files(h5_files)
+    bad = _validate_cache_files(cache_files)
     if bad:
         raise RuntimeError(
             f"{subset}: {len(bad)} cache files fail validate_cache(); first={bad[:3]}"

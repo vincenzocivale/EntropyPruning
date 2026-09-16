@@ -119,7 +119,8 @@ def test_context_descriptors_are_finite() -> None:
         spatial_neighbors=4,
         seed=17,
     )
-    assert result.shape == (50, 11)
+    # Ten base descriptors plus two spatial-neighborhood descriptors.
+    assert result.shape == (50, 12)
     assert np.isfinite(result).all()
 
 

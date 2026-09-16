@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 
 from .utils import atomic_output_path
+from .numpy_store import NumpyStoreWriter, array_names, read_array, read_metadata
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,15 @@ def write_tile_feature_record(
         if not np.isfinite(arr).all():
             raise ValueError(f"Embedding {name!r} contains NaN/Inf")
 
+    if Path(path).suffix == ".npyd":
+        with NumpyStoreWriter(path, {"schema": "eaf.wsi.tile_features.v2", "slide_id": record.slide_id,
+                                     "n_tiles": n_tiles, "storage_dtype": storage_dtype,
+                                     **dict(record.metadata)}, replace=True) as store:
+            store.write("coords", coords.astype(np.int32, copy=False))
+            for name, values in record.embeddings.items():
+                store.write(f"embeddings/{name}", np.asarray(values, dtype=dtype))
+        return
+
     with atomic_output_path(Path(path)) as tmp:
         with h5py.File(tmp, "w") as handle:
             handle.attrs["schema"] = "eaf.wsi.tile_features.v2"
@@ -90,6 +100,14 @@ def write_tile_feature_record(
 
 def read_tile_feature_record(path: Path, *, squeeze_singleton: bool = True) -> TileFeatureRecord:
     path = Path(path)
+    if path.suffix == ".npyd":
+        metadata = read_metadata(path)
+        if not metadata.get("complete", False):
+            raise RuntimeError(f"Incomplete feature file: {path}")
+        embeddings = {key.removeprefix("embeddings/"): read_array(path, key)
+                      for key in array_names(path) if key.startswith("embeddings/")}
+        return TileFeatureRecord(str(metadata.get("slide_id", path.stem)), read_array(path, "coords"),
+                                 embeddings, metadata)
     with h5py.File(path, "r") as handle:
         schema = str(handle.attrs.get("schema", "legacy"))
         slide_id = str(handle.attrs.get("slide_id", path.stem))
@@ -123,6 +141,23 @@ def write_wsi_output_record(
     slide_embedding = np.asarray(record.slide_embedding)
     if slide_embedding.ndim not in (1, 2):
         raise ValueError(f"slide_embedding must be 1D or 2D, got {slide_embedding.shape}")
+    if Path(path).suffix == ".npyd":
+        with NumpyStoreWriter(path, {"schema": "eaf.wsi.fm_output.v1", "slide_id": record.slide_id,
+                                     "storage_dtype": storage_dtype, **dict(record.metadata)}, replace=True) as store:
+            store.write("slide_embedding", slide_embedding.astype(dtype, copy=False))
+            if record.coords is not None:
+                store.write("coords", np.asarray(record.coords, dtype=np.int32))
+            for name, values in record.attention.items():
+                arr = np.asarray(values)
+                if not np.isfinite(arr).all():
+                    raise ValueError(f"Attention {name!r} contains NaN/Inf")
+                store.write(f"attention/{name}", arr.astype(dtype, copy=False))
+            for name, values in record.auxiliary.items():
+                arr = np.asarray(values)
+                if np.issubdtype(arr.dtype, np.floating) and not np.isfinite(arr).all():
+                    raise ValueError(f"Auxiliary array {name!r} contains NaN/Inf")
+                store.write(f"auxiliary/{name}", arr)
+        return
     with atomic_output_path(Path(path)) as tmp:
         with h5py.File(tmp, "w") as handle:
             handle.attrs["schema"] = "eaf.wsi.fm_output.v1"
@@ -165,6 +200,19 @@ def write_wsi_output_record(
 
 def read_wsi_output_record(path: Path) -> WSIOutputRecord:
     path = Path(path)
+    if path.suffix == ".npyd":
+        metadata = read_metadata(path)
+        if not metadata.get("complete", False):
+            raise RuntimeError(f"Incomplete WSI output file: {path}")
+        names = array_names(path)
+        attention = {key.removeprefix("attention/"): read_array(path, key)
+                     for key in names if key.startswith("attention/")}
+        auxiliary = {key.removeprefix("auxiliary/"): read_array(path, key)
+                     for key in names if key.startswith("auxiliary/")}
+        return WSIOutputRecord(str(metadata.get("slide_id", path.stem)),
+                               read_array(path, "slide_embedding"),
+                               read_array(path, "coords") if "coords" in names else None,
+                               attention, auxiliary, metadata)
     with h5py.File(path, "r") as handle:
         if not bool(handle.attrs.get("complete", False)):
             raise RuntimeError(f"Incomplete WSI output file: {path}")
@@ -185,6 +233,12 @@ def output_is_complete(path: Path, expected_schema: str) -> bool:
     path = Path(path)
     if not path.exists():
         return False
+    if path.suffix == ".npyd":
+        try:
+            metadata = read_metadata(path)
+            return bool(metadata.get("complete")) and metadata.get("schema") == expected_schema
+        except (OSError, ValueError):
+            return False
     try:
         with h5py.File(path, "r") as handle:
             return bool(handle.attrs.get("complete", False)) and str(handle.attrs.get("schema")) == expected_schema

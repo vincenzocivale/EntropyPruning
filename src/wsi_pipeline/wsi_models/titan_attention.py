@@ -34,7 +34,7 @@ class TitanAttentionCaptureConfig:
     # to input-tile order. This is the "intermediate WSI-FM representation" input
     # for a WSI-EAF forecaster that predicts final-layer attention from TITAN's own
     # partial forward, instead of from the tile encoder's context-free output -- see
-    # ``src/models/wsi/dense_forecaster.py`` and ``docs/offline_eaf_pipeline.md``.
+    # ``src/models/wsi/dense_forecaster.py`` and ``docs/pipeline.md``.
     hidden_layers: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:

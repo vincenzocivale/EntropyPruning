@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Inspect an EAF WSI HDF5 feature store."""
+"""Inspect an EAF WSI feature store."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data.wsi import H5WSIFeatureStore
+from src.data.wsi import open_feature_store
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Inspect an EAF WSI HDF5 feature store.")
+    parser = argparse.ArgumentParser(description="Inspect an EAF WSI feature store (.npyd or legacy .h5).")
 
     parser.add_argument("--feature-store", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, default=None)
@@ -77,7 +77,7 @@ def inspect_feature_store(
     *,
     max_examples: int = 5,
 ) -> dict[str, Any]:
-    store = H5WSIFeatureStore(feature_store)
+    store = open_feature_store(feature_store, read_only=True)
     slide_ids = store.slide_ids()
 
     if not slide_ids:

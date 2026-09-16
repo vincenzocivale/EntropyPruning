@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Validate an HDF5 WSI feature store.
+"""Validate an EAF WSI feature store.
 
 The script checks that bags stored in ``H5WSIFeatureStore`` are usable for
 WSI-level tile attention forecasting before launching training.
@@ -18,11 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data.wsi import H5WSIFeatureStore
+from src.data.wsi import WSIFeatureStore, open_feature_store
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate a WSI HDF5 feature store.")
+    parser = argparse.ArgumentParser(description="Validate a WSI feature store (.npyd or legacy .h5).")
 
     parser.add_argument("--feature-store", type=Path, required=True)
     parser.add_argument("--feature-dim", type=int, default=None)
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _validate_slide(
-    store: H5WSIFeatureStore,
+    store: WSIFeatureStore,
     slide_id: str,
     *,
     expected_feature_dim: int | None,
@@ -121,7 +121,7 @@ def _validate_slide(
 def main() -> int:
     args = parse_args()
 
-    store = H5WSIFeatureStore(args.feature_store)
+    store = open_feature_store(args.feature_store, read_only=True)
     slide_ids = store.slide_ids()
 
     errors: list[dict[str, str]] = []

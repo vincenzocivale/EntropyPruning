@@ -37,7 +37,7 @@ def extract_one_wsi(
     feature_key: str | None = None,
 ) -> dict:
     record = read_tile_feature_record(feature_path)
-    output_path = Path(config.output_dir) / f"{record.slide_id}.h5"
+    output_path = Path(config.output_dir) / f"{record.slide_id}.npyd"
     if not config.overwrite and output_is_complete(output_path, "eaf.wsi.fm_output.v1"):
         return {"slide_id": record.slide_id, "path": str(output_path), "status": "skipped"}
 

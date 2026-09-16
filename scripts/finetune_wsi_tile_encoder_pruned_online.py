@@ -30,6 +30,7 @@ from src.utils import default_checkpoint_root, set_seed, tile_encoder_dir_name
 from src.wsi_pipeline.cache_index import read_tile_cache_index
 from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
+from src.wsi_pipeline.experiment_results import publish_run_summary
 
 
 def _autocast(device: torch.device, amp_dtype: str):
@@ -180,7 +181,7 @@ def main() -> None:
     )
     parser.add_argument("--train-wsi-fraction", type=float, default=0.5)
     # 100, not the historical 500: distillation loss plateaus within a few hundred
-    # steps (see docs/tile_eaf_experiment_roadmap.md, 2026-08-24 finding on
+    # steps (see docs/pipeline.md for the current profiling rule on
     # pruned20pct) -- a shorter epoch lets --early-stopping-patience actually catch
     # the plateau instead of grinding through ~19k batches before the first check.
     parser.add_argument("--tiles-per-wsi", type=int, default=100)
@@ -190,7 +191,7 @@ def main() -> None:
     # 16/20, not 8/4: with --slides-per-batch 16, a --slide-cache-size smaller than
     # that forces most WSI handles in every batch group to be reopened from
     # scratch, causing a burst-then-stall pattern (see "Note operative" in
-    # docs/tile_eaf_experiment_roadmap.md). --num-workers 16 matches -- the machine
+    # docs/pipeline.md). --num-workers 16 matches -- the machine
     # has far more CPU headroom than 8 workers uses.
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--prefetch-factor", type=int, default=2)
@@ -536,6 +537,7 @@ def main() -> None:
     (output_dir / f"summary_{run_name}.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
+    publish_run_summary(family="tile_eaf", stage="distillation", run_name=run_name, args=args, summary=summary)
     if use_wandb:
         wandb.summary["best_val_loss"] = best_val
         wandb.summary["checkpoint"] = str(checkpoint_path)

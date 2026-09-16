@@ -2,10 +2,12 @@
 checkpoints/
 results/
 reports/
+eagle_baseline_results.csv
 /wandb/
 __pycache__/
 *.pyc
 *.h5
+*.npyd/
 .ipynb_checkpoints/
 .pytest_cache/
 # Runtime logs
@@ -33,3 +35,4 @@ artifacts/
 /caches/
 /archives/
 .eaf-tmp/
+v

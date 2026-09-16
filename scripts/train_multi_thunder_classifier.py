@@ -401,6 +401,11 @@ def main():
         "args": vars(args),
     }
     save_results(output_dir / "results.json", results)
+    from src.wsi_pipeline.experiment_results import publish_run_summary
+    publish_run_summary(
+        family="tile_eaf", stage="evaluation", run_name=default_dir_name,
+        args=args, summary={"checkpoint": str(output_dir / "best_model.pt"), **results},
+    )
     print(f"\nResults saved to: {output_dir}")
 
     if use_wandb:

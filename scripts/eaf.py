@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 import sys
@@ -34,6 +35,9 @@ from src.wsi_pipeline.archive import (  # noqa: E402
 from src.wsi_pipeline.cache_contracts import TileCacheSpec  # noqa: E402
 from src.wsi_pipeline.cache_index import build_tile_cache_index  # noqa: E402
 from src.wsi_pipeline.cache_io import validate_cache  # noqa: E402
+from src.wsi_pipeline.numpy_store import convert_h5, verify_conversion  # noqa: E402
+from src.wsi_pipeline.model_adapters import PrunedLoRATileTeacherAdapter  # noqa: E402
+from src.wsi_pipeline.experiment_catalog import audit_experiments, write_catalog  # noqa: E402
 from src.wsi_pipeline.registry import load_slides, write_manifest  # noqa: E402
 from src.wsi_pipeline.tile_cache_pipeline import (  # noqa: E402
     TileCacheItem,
@@ -62,6 +66,13 @@ def cmd_layout(args: argparse.Namespace) -> None:
         "results": str(layout.results),
         "logs": str(layout.logs),
     }, indent=2))
+
+
+def cmd_experiments_audit(args: argparse.Namespace) -> None:
+    root = _root(args)
+    catalog = audit_experiments(root, REPO_ROOT)
+    path = write_catalog(catalog, root / "results" / "experiment_catalog")
+    print(json.dumps({"catalog": str(path), "counts": catalog["counts"]}, indent=2))
 
 
 def cmd_plan_histai(args: argparse.Namespace) -> None:
@@ -105,6 +116,47 @@ def cmd_validate_cache(args: argparse.Namespace) -> None:
     print(json.dumps(validate_cache(args.path, expected_kind=args.kind), indent=2))
 
 
+def cmd_convert_numpy(args: argparse.Namespace) -> None:
+    """Resume a checked conversion of generated cache HDF5 files."""
+    root = _root(args)
+    paths = sorted((root / args.scope).rglob("*.h5"))
+    if args.max_files is not None:
+        paths = paths[:args.max_files]
+    counts = {"converted": 0, "verified_existing": 0, "errors": 0}
+    failures: list[dict[str, str]] = []
+    def record(index: int, result: tuple[str, str, str | None]) -> None:
+        status, path, error = result
+        counts[status] += 1
+        if error:
+            failures.append({"path": path, "error": error})
+        if index % args.report_every == 0:
+            print(json.dumps({"processed": index, "total": len(paths), **counts}), flush=True)
+
+    if args.workers == 1:
+        for index, path in enumerate(paths, 1):
+            record(index, _convert_one_numpy(path))
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            for index, result in enumerate(pool.map(_convert_one_numpy, paths, chunksize=16), 1):
+                record(index, result)
+    print(json.dumps({"processed": len(paths), "total": len(paths), **counts,
+                      "failures": failures[:20]}, indent=2), flush=True)
+    if counts["errors"]:
+        raise SystemExit(1)
+
+
+def _convert_one_numpy(source: Path) -> tuple[str, str, str | None]:
+    try:
+        destination = source.with_suffix(".npyd")
+        if destination.exists():
+            verify_conversion(source, destination)
+            return "verified_existing", str(source), None
+        convert_h5(source)
+        return "converted", str(source), None
+    except Exception as exc:
+        return "errors", str(source), repr(exc)
+
+
 def cmd_index_tile_cache(args: argparse.Namespace) -> None:
     rows = build_tile_cache_index(
         args.slides,
@@ -123,7 +175,32 @@ def cmd_cache_tile(args: argparse.Namespace) -> None:
     device = torch.device(
         args.device if (torch.cuda.is_available() or not args.device.startswith("cuda")) else "cpu"
     )
-    adapter = build_encoder(args.encoder, token=args.hf_token, device=device)
+    if args.pruned_adapter_ckpt is not None:
+        # Pruned-input cache: embeddings come from a tile-EAF Stage-2 pruned+LoRA
+        # encoder instead of the frozen --encoder. See PrunedLoRATileTeacherAdapter
+        # for why --thunder-model-name/--prune-layer/--keep-ratio/--forecaster-ckpt
+        # are all optional (auto-resolved from the checkpoint) and why
+        # final_attention in the resulting cache is a placeholder.
+        adapter = PrunedLoRATileTeacherAdapter(
+            pruned_adapter_ckpt=args.pruned_adapter_ckpt,
+            forecaster_ckpt=args.forecaster_ckpt,
+            thunder_model_name=args.thunder_model_name,
+            prune_layer=args.prune_layer,
+            keep_ratio=args.keep_ratio,
+            lora_r=args.pruned_lora_r,
+            lora_alpha=args.pruned_lora_alpha,
+            lora_dropout=args.pruned_lora_dropout,
+            device=device,
+        )
+        print(
+            f"[eaf-cache-tile] pruned-input cache: encoder={adapter.name} "
+            f"prune_layer={adapter.prune_layer} keep_ratio={adapter.keep_ratio} "
+            f"forecaster={adapter.forecaster_checkpoint} -- convention: name "
+            "--output-dir '<base-cache-dir>__pruned_<tile-run-name>' so it is never "
+            "confused with the base frozen-encoder cache (see docs/pipeline.md)"
+        )
+    else:
+        adapter = build_encoder(args.encoder, token=args.hf_token, device=device)
 
     items: list[TileCacheItem] = []
     if args.manifest is not None:
@@ -339,6 +416,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_root(layout)
     layout.set_defaults(func=cmd_layout)
 
+    experiments = sub.add_parser("experiments", help="Inspect experiment artifacts")
+    experiments_sub = experiments.add_subparsers(dest="experiments_command", required=True)
+    p = experiments_sub.add_parser("audit", help="Catalog canonical and legacy runs")
+    add_root(p)
+    p.set_defaults(func=cmd_experiments_audit)
+
     data = sub.add_parser("data", help="Plan/download pretraining corpora")
     data_sub = data.add_subparsers(dest="data_command", required=True)
 
@@ -405,6 +488,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", choices=("tile_eaf", "wsi_eaf"))
     p.set_defaults(func=cmd_validate_cache)
 
+    p = cache_sub.add_parser("convert-numpy", help="Convert generated HDF5 to verified .npyd directories")
+    add_root(p)
+    p.add_argument("--scope", choices=("caches", "datasets"), default="caches")
+    p.add_argument("--max-files", type=int, help="Limit for a trial conversion")
+    p.add_argument("--report-every", type=int, default=100)
+    p.add_argument("--workers", type=int, default=1)
+    p.set_defaults(func=cmd_convert_numpy)
+
     p = cache_sub.add_parser(
         "index-tile", help="Validate and index compact per-slide caches for training"
     )
@@ -448,6 +539,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--early-layer", type=int, default=2,
         help="0-based transformer block index; value = that block's OUTPUT (post-residual). See TileCacheSpec.early_layer_semantics.",
     )
+    p.add_argument(
+        "--pruned-adapter-ckpt", type=Path, default=None,
+        help=(
+            "Build a pruned-input cache instead: --encoder is ignored and tile_embeddings "
+            "come from this tile-EAF Stage-2 checkpoint's forecaster-guided-pruned + LoRA "
+            "forward pass (finetune_wsi_tile_encoder_pruned_online.py's best_<run>.pt) -- "
+            "see PrunedLoRATileTeacherAdapter. --thunder-model-name/--prune-layer/"
+            "--keep-ratio/--forecaster-ckpt/--pruned-lora-* below all auto-resolve from "
+            "this checkpoint's own recorded config when omitted."
+        ),
+    )
+    p.add_argument(
+        "--thunder-model-name", default=None,
+        help="THUNDER --model-name backing --pruned-adapter-ckpt (e.g. 'titan' for CONCH v1.5, "
+        "'uni2h', ...). Auto-resolved from the checkpoint's config.model_name if omitted.",
+    )
+    p.add_argument("--forecaster-ckpt", type=Path, default=None, help="Overrides the forecaster_checkpoint recorded in --pruned-adapter-ckpt")
+    p.add_argument("--prune-layer", type=int, default=None, help="Overrides the prune_layer recorded in --pruned-adapter-ckpt's config")
+    p.add_argument("--keep-ratio", type=float, default=None, help="Overrides the keep_ratio recorded in --pruned-adapter-ckpt's config")
+    p.add_argument("--pruned-lora-r", type=int, default=None, help="Overrides lora_r recorded in --pruned-adapter-ckpt's config (default 8)")
+    p.add_argument("--pruned-lora-alpha", type=int, default=None, help="Overrides lora_alpha recorded in --pruned-adapter-ckpt's config (default 32)")
+    p.add_argument("--pruned-lora-dropout", type=float, default=None, help="Overrides lora_dropout recorded in --pruned-adapter-ckpt's config (default 0.05)")
     p.add_argument("--input-mag", type=int, default=20)
     p.add_argument("--patch-size", type=int, default=512)
     p.add_argument("--stride", type=int, default=512)

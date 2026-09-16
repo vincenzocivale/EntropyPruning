@@ -14,6 +14,7 @@ from typing import Any
 import torch
 
 from src.data.wsi.bag import WSIBag
+from src.wsi_pipeline.numpy_store import array_names, preferred_path, read_array
 
 
 try:
@@ -49,6 +50,18 @@ def _read_h5_dataset(
     fallback_names: tuple[str, ...],
     expected_ndim: int,
 ) -> torch.Tensor:
+    path = preferred_path(path)
+    if path.suffix == ".npyd":
+        names = array_names(path)
+        if dataset_name is not None:
+            candidates = (dataset_name,)
+        else:
+            candidates = fallback_names + tuple(name for name in names if name not in fallback_names)
+        selected = next((name for name in candidates if name in names and
+                         read_array(path, name, mmap=True).ndim == expected_ndim), None)
+        if selected is None:
+            raise ValueError(f"no {expected_ndim}D dataset found in {path}; tried {fallback_names}.")
+        return torch.as_tensor(read_array(path, selected))
     _require_h5py()
 
     if not path.exists():

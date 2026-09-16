@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 
 from .registry import load_artifacts
 from .utils import json_dump_atomic, stable_seed
+from .numpy_store import array_names, read_array
 
 
 @dataclass(frozen=True)
@@ -245,6 +246,19 @@ def assign_case_splits(table: pd.DataFrame, config: SignalDiscoveryConfig) -> pd
 
 def _read_feature_array(path: Path, feature_key: str) -> tuple[np.ndarray, np.ndarray]:
     path = Path(path)
+    if path.suffix == ".npyd":
+        names = array_names(path)
+        key = next((candidate for candidate in (f"embeddings/{feature_key}", feature_key,
+                                               "features" if feature_key == "final" else "") if candidate in names), None)
+        if key is None:
+            raise KeyError(f"Feature key {feature_key!r} not found in {path}; available={names}")
+        values = read_array(path, key)
+        coords = read_array(path, "coords")
+        if values.ndim == 3 and values.shape[1] == 1:
+            values = values[:, 0, :]
+        if values.ndim != 2 or len(coords) != len(values) or not np.isfinite(values).all():
+            raise ValueError(f"Invalid feature array in {path}")
+        return values.astype(np.float32, copy=False), coords
     with h5py.File(path, "r") as handle:
         if "embeddings" in handle and feature_key in handle["embeddings"]:
             values = np.asarray(handle["embeddings"][feature_key][:])
@@ -273,6 +287,19 @@ def _read_feature_array(path: Path, feature_key: str) -> tuple[np.ndarray, np.nd
 
 def _read_attention_array(path: Path, key: str, layer: int) -> tuple[np.ndarray, np.ndarray | None]:
     path = Path(path)
+    if path.suffix == ".npyd":
+        dataset_path = key if key.startswith("attention/") else f"attention/{key}"
+        names = array_names(path)
+        if dataset_path not in names:
+            raise KeyError(f"Attention key {dataset_path!r} not found in {path}; available={names}")
+        values = np.asarray(read_array(path, dataset_path), dtype=np.float32)
+        coords = read_array(path, "coords") if "coords" in names else None
+        if values.ndim == 3:
+            layer_index = layer if layer >= 0 else values.shape[0] + layer
+            if not 0 <= layer_index < values.shape[0]:
+                raise IndexError(f"Layer {layer} outside attention shape {values.shape}")
+            values = values[layer_index]
+        return values, coords
     with h5py.File(path, "r") as handle:
         dataset_path = key if key.startswith("attention/") else f"attention/{key}"
         if dataset_path not in handle:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from tqdm.auto import tqdm
+from .numpy_store import convert_h5
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class TridentConfig:
     remove_artifacts: bool = False
     remove_penmarks: bool = False
     temp_dir: Path | None = None
+    max_workers: int | None = None
+    convert_numpy: bool = True
 
 
 def _base_command(config: TridentConfig) -> list[str]:
@@ -42,6 +45,12 @@ def _base_command(config: TridentConfig) -> list[str]:
         command += ["--custom_list_of_wsis", str(config.custom_list_of_wsis)]
     if config.search_nested:
         command.append("--search_nested")
+    if config.max_workers is not None:
+        # TRIDENT defaults to a fraction of os.cpu_count(); on a large shared
+        # server (e.g. 320 cores) that auto-scales to hundreds of ephemeral
+        # worker processes per slide. Cap it explicitly to stay a good
+        # multi-tenant citizen.
+        command += ["--max_workers", str(config.max_workers)]
     return command
 
 
@@ -91,3 +100,6 @@ def run_trident_preprocessing(config: TridentConfig, stages: Sequence[str], *, d
         print(f"[eaf-wsi] {printable}", flush=True)
         if not dry_run:
             subprocess.run(command, cwd=config.trident_repo, env=environment, check=True)
+    if not dry_run and config.convert_numpy and "coords" in stages:
+        for path in tqdm(sorted(config.job_dir.rglob("*.h5")), desc="TRIDENT NumPy conversion", unit="file"):
+            convert_h5(path)

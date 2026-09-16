@@ -1,157 +1,22 @@
-# CLAUDE.md
+# EAF contributor notes
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-EntropyPruning is a research project implementing attention entropy-aware token pruning for Vision Transformers (ViTs), applied to histological image classification. The backbone is the UNI (Universal Image) ViT-L model, enhanced with LoRA adapters. An `AttentionForecaster` predicts which tokens to prune at intermediate layers based on source-layer embeddings, enabling efficient inference without recomputing all attention.
-
-## Environment Setup
+Use the Conda environment in `environment.yml` and run commands from the
+repository root.
 
 ```bash
 conda create -n trident --file environment.yml
-# or update existing:
-conda env update -n trident --file environment.yml
 conda activate trident
+export EAF_WSI_ROOT=/path/to/WSI
+pytest
 ```
 
-Key dependencies: PyTorch 2.6.0, transformers 4.51.3, timm 1.0.25, peft (LoRA), wandb, h5py, fvcore.
+`$EAF_WSI_ROOT` is the single location for data, caches, checkpoints, results
+and logs. The repository stores code and small metadata only.
 
-## Classifier fine-tuning (pre-WSI, Phase 1 only)
+The supported workflow is documented in `README.md`, `docs/data_layout.md` and
+`docs/pipeline.md`. Prefer `python scripts/eaf.py ...` for data and cache
+operations. Preserve raw WSI, existing TCGA/HEST assets and the separation
+between pretraining and downstream datasets.
 
-```bash
-python scripts/train_classifier.py \
-    --data-dir /path/to/dataset \
-    --img-size 224 \
-    --batch-size 8 \
-    --epochs 20 \
-    --lr-head 1e-3 \
-    --lr-backbone 1e-5 \
-    --output-dir /raid/DATASETS/checkpoints-Attention-Pruning/<dataset>/uni_finetuned
-```
-
-Trains `UNILoRAClassifier` (pretrained UNI + LoRA + linear head). Checkpoint saved as `best_model.pt`.
-
-This was originally "Phase 1" of a three-phase pipeline (classifier → forecaster →
-pruned fine-tuning) on plain image-classification datasets. Phases 2 and 3
-(`train_forecaster.py`, `finetune_pruned.py`) were retired in the tile-EAF
-minimal-pipeline refactor (2026-08-24): both had already been repurposed into thin
-compatibility shims delegating to the WSI tile-EAF scripts below, and are now removed
-entirely. For attention-forecaster training and pruned-encoder fine-tuning, use the
-tile-EAF pipeline documented in `docs/wsi_tile_online_training.md` and
-`docs/offline_eaf_pipeline.md` (`scripts/train_wsi_tile_eaf_online.py`,
-`scripts/finetune_wsi_tile_encoder_pruned_online.py`) instead.
-
-### Layer ablation study
-
-```bash
-python scripts/ablations/layer_ablation.py \
-    --data-dir /path/to/dataset \
-    --layers-source 2 \
-    --layers-target 23 22 21 20 \
-    --keep-ratio 0.1 \
-    --wandb-project layer-ablation-targets
-```
-
-## Architecture
-
-```
-src/
-├── models/
-│   ├── classifier.py          # UNILoRAClassifier — pretrained UNI + LoRA + linear head
-│   ├── forecaster.py          # AttentionForecaster — transformer-based attention predictor
-│   └── pruned_classifier.py   # UNILoRAWithForecasterPruning — classifier with pruning hook
-├── data/
-│   ├── dataset.py             # HistologicalImageDataset (HuggingFace, RGB/RGBA handling)
-│   ├── loaders.py             # build_loaders() — train/val/test dataloaders, weighted sampling
-│   ├── h5_dataset.py          # H5ForecastDataset — loads HDF5 embeddings for forecaster
-│   └── transforms.py          # ImageNet-normalized augmentations
-├── collection/
-│   └── extract_features.py    # collect_and_save_dataset() — hook-based HDF5 extraction
-├── evaluation/
-│   ├── metrics.py             # evaluate() — accuracy, F1-macro, TAR@FAR
-│   └── benchmark.py           # benchmark_model() — inference time and FLOPs via fvcore
-├── baselines/
-│   ├── cropr/                 # CropR baseline
-│   ├── evit/                  # EfficientViT baseline
-│   ├── dynamic_vit/           # DynamicViT baseline
-│   └── ucb/                   # UCB-based dynamic pruning
-└── utils.py                   # set_seed(), get_device()
-scripts/
-├── train_classifier.py
-├── train_forecaster.py
-├── finetune_pruned.py
-└── ablations/layer_ablation.py
-notebooks/                     # Analysis and visualization
-```
-
-## Data & Checkpoint Layout
-
-`data/` is local-only and ignored by Git. It holds external Thunder data by
-symlink and local TCGA/WSI inputs; raw slides and reusable TRIDENT outputs are
-kept once per cohort, while checkpoints, logs, rankings, and generated WSI
-feature stores are disposable run artifacts. See `docs/data_layout.md` for the
-canonical directory layout and placement rules.
-
-Legacy (Phase 2/3, retired) tile-level forecaster cache HDF5 layout, kept here only to
-explain any pre-existing artifacts still on disk under
-`/raid/DATASETS/checkpoints-Attention-Pruning/{dataset}/` — current code no longer
-produces this layout (see the note above the "Layer ablation study" section):
-
-```
-{dataset}_forecaster_dataset.h5
-└── /{split}/
-    ├── labels          [n_samples]
-    ├── emb_layer{i}    [n_samples × 196 × 1024]
-    └── attn_layer{i}   [n_samples × 196]
-```
-
-```
-uni_finetuned/best_model.pt
-forecaster/forecaster_src{src:02d}_tgt{tgt:02d}.pt
-pruned_finetuned/pruned_models/
-```
-
-For current tile-EAF checkpoint layout (`checkpoints/tile_eaf/`,
-`checkpoints/pruned_finetuned/` under `$EAF_WSI_ROOT`), see `docs/data_layout.md`.
-
-## WSI EAF Training Data Policy
-
-The separate WSI-level EAF work (Tile-EAF / WSI-EAF, `src/wsi_pipeline/`,
-`src/data/wsi/`, `scripts/eaf.py`) uses a different, larger-scale pretraining
-corpus than the classifier/forecaster pipeline above. The canonical runtime
-root is `$EAF_WSI_ROOT` (see `docs/data_layout.md`).
-
-**The EAF training corpus is HISTAI + GTEx + HEST only. TCGA is explicitly
-excluded from EAF pretraining.** Raw TCGA slides remain untouched under
-`sources/gdc/tcga` (recoverable there if ever needed), but the curated
-TCGA-derived pretraining datasets (`tcga_eaf_multicohort_v1`,
-`tcga_eaf_thunder_clean_v1`, and the merged `eaf_multisource_clean_v1`) were
-deleted from `$EAF_WSI_ROOT` on 2026-08-07 — they are not kept on disk even
-as an ablation/non-EAF reserve; regenerate from raw via
-`scripts/wsi_data/build_tcga_thunder_clean_inventory.py` and
-`build_eaf_multisource_manifest.py` if a TCGA-inclusive ablation is ever
-needed. TCGA exclusion exists because many downstream THUNDER benchmarks
-(`catalog/benchmark_registry.csv`) are themselves TCGA-derived, so including
-TCGA in EAF pretraining would risk leakage into those evaluations.
-
-`eaf_wsi_pretrain_strict_v1` (`src/data/wsi/corpora.py:build_strict_corpus`,
-`python scripts/eaf.py data build-strict`) is the logical union of HISTAI +
-GTEx + HEST — no duplicated pixels, TCGA excluded by construction via a
-leakage guard — and is the manifest that EAF training should read. See
-`docs/offline_eaf_pipeline.md` and `docs/refactor_migration.md` for the
-offline teacher-cache pipeline and the full dataset-layout rationale.
-
-## Key Design Details
-
-- **Layer indexing**: 0-based; layer 23 is the final transformer block; layer 2 is the canonical early prune point used in ablations.
-- **Token count**: 196 patch tokens (14×14 grid) from 224×224 images with 16×16 patches.
-- **Pruning training**: Straight-through estimator keeps gradients flowing through the discrete pruning mask during fine-tuning.
-- **LoRA**: Applied to UNI backbone; only LoRA params + classification head are updated in Phases 1 and 3.
-- **Reproducibility**: `set_seed(42)` called at start of each script.
-- **Mixed precision**: `torch.amp.autocast()` used throughout for memory efficiency.
-- **Gradient clipping**: `clip_grad_norm_(model.parameters(), 1.0)` applied during training.
-
-## Experiment Tracking
-
-All three phases log to Weights & Biases. Pass `--wandb-project <name>` to each script. Phase 2 tracks KL divergence and Spearman rho; Phase 3 tracks accuracy, F1-macro, TAR@FAR, inference time, and FLOPs.
+New derived numerical data use `.npyd` directories. HDF5 remains readable for
+historical artifacts during migration.

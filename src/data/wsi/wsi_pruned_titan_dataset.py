@@ -20,22 +20,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import h5py
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.wsi_pipeline.numpy_store import read_array
+
 
 def _load_tile_bag(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
-    with h5py.File(path, "r") as handle:
-        tile_features = torch.from_numpy(handle["tile_embeddings"][...]).to(torch.float32)
-        coords = torch.from_numpy(handle["coords"][...]).to(torch.long)
+    tile_features = torch.from_numpy(read_array(path, "tile_embeddings")).to(torch.float32)
+    coords = torch.from_numpy(read_array(path, "coords")).to(torch.long)
     return tile_features, coords
 
 
 def _load_teacher_embedding(path: Path) -> torch.Tensor:
-    with h5py.File(path, "r") as handle:
-        embedding = torch.from_numpy(handle["slide_embedding"][...]).to(torch.float32)
+    embedding = torch.from_numpy(read_array(path, "slide_embedding")).to(torch.float32)
     while embedding.dim() > 1 and embedding.shape[0] == 1:
         embedding = embedding.squeeze(0)
     return embedding

@@ -10,6 +10,7 @@ by ABMIL, TITAN, and other WSI encoders.
 from __future__ import annotations
 
 import argparse
+import shutil
 import csv
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.wsi.bag import WSIBag
-from src.data.wsi.h5_feature_store import H5WSIFeatureStore
+from src.data.wsi import open_feature_store
 from src.data.wsi.morphology_coarsening import (
     COARSENING_STRATEGIES,
     MorphologyCoarseningConfig,
@@ -35,7 +36,7 @@ from src.data.wsi.morphology_coarsening import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a coarsened HDF5 WSI feature store using random, spatial, "
+            "Create a coarsened NumPy WSI feature store using random, spatial, "
             "morphology-only, or morphology-and-topology-preserving selection."
         )
     )
@@ -171,7 +172,10 @@ def main() -> int:
     config = _config_from_args(args)
 
     if args.output_feature_store.exists() and args.overwrite:
-        args.output_feature_store.unlink()
+        if args.output_feature_store.is_dir():
+            shutil.rmtree(args.output_feature_store)
+        else:
+            args.output_feature_store.unlink()
     args.output_feature_store.parent.mkdir(parents=True, exist_ok=True)
 
     report_csv = args.report_csv or args.output_feature_store.with_suffix(
@@ -184,8 +188,8 @@ def main() -> int:
         if path.exists() and not args.overwrite:
             raise FileExistsError(f"report already exists: {path}")
 
-    input_store = H5WSIFeatureStore(args.input_feature_store)
-    output_store = H5WSIFeatureStore(args.output_feature_store)
+    input_store = open_feature_store(args.input_feature_store, read_only=True)
+    output_store = open_feature_store(args.output_feature_store)
     available = input_store.slide_ids()
     if not available:
         raise ValueError(f"input store contains no slides: {args.input_feature_store}")

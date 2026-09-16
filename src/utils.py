@@ -36,6 +36,17 @@ def tile_encoder_dir_name(model_name: str) -> str:
     return TILE_ENCODER_DIR_ALIASES.get(model_name, model_name)
 
 
+def wsi_encoder_pair_dir_name(tile_encoder: str, wsi_encoder: str) -> str:
+    """Checkpoint-directory-safe name for a (tile encoder, WSI encoder) pair, e.g.
+    ``conch_v15__titan`` -- the ``<tile_encoder>__<wsi_encoder>`` namespace already
+    reserved for WSI-EAF checkpoints/caches in docs/data_layout.md. ``tile_encoder``
+    is resolved through `tile_encoder_dir_name` first so a raw THUNDER `--model-name`
+    (e.g. "titan", which loads CONCH v1.5 as the *tile* encoder) is normalized the
+    same way tile-EAF checkpoint dirs already are.
+    """
+    return f"{tile_encoder_dir_name(tile_encoder)}__{wsi_encoder}"
+
+
 def default_checkpoint_root(subdir: str) -> Path:
     """`$EAF_WSI_ROOT/checkpoints/<subdir>` (see `src/data/wsi/layout.py::StoreLayout`)
     -- checkpoints belong under the canonical data root, not the repo working

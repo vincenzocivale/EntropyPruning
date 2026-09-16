@@ -27,6 +27,8 @@ from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
 from src.models import AttentionForecaster, ThunderBackboneAdapter
 from src.models.online_tile_eaf import OnlineAttentionTeacher, load_checkpoint_flexibly
+from src.training.tile_eaf_profile import build_tile_eaf_profile
+from src.wsi_pipeline.experiment_results import publish_run_summary
 from src.utils import default_checkpoint_root, set_seed, tile_encoder_dir_name
 
 
@@ -211,6 +213,7 @@ def _run_epoch(
     metrics["ranking_tiles"] = float(ranking_total)
     metrics["tiles"] = float(total)
     metrics["tiles_per_second"] = total / elapsed
+    metrics["elapsed_seconds"] = elapsed
     metrics["phase_seconds"] = phase_seconds
     return metrics, global_step
 
@@ -353,7 +356,7 @@ def main() -> None:
     # 16, not 4: with this batch size, --slides-per-batch must scale up too or
     # tiles_per_slide_per_batch shrinks enough that rounds_per_group collides with
     # --num-workers, forcing near-constant cold WSI-handle reopening (see "Note
-    # operative" in docs/tile_eaf_experiment_roadmap.md for the exact mechanism).
+    # profile and compare one configuration change at a time; see docs/pipeline.md).
     parser.add_argument("--slides-per-batch", type=int, default=16)
     parser.add_argument(
         "--train-wsis-per-epoch", type=int, default=0,
@@ -812,6 +815,16 @@ def main() -> None:
             f"top{args.keep_ratio_metric:.0%}_recall={val_metrics['topk_recall']:.4f} "
             f"best={best_val:.5f}"
         )
+        if args.profile_json:
+            train_profile = build_tile_eaf_profile(
+                [{"epoch": epoch + 1, "train": train_metrics, "val": val_metrics}]
+            )["aggregate"]["train"]
+            print(
+                "Profile train | "
+                f"{train_profile['tiles_per_second']:.1f} tiles/s | "
+                f"bottleneck={train_profile['bottleneck']} "
+                f"({train_profile['phase_share'][train_profile['bottleneck']]:.0%})"
+            )
         if (
             args.early_stopping_patience > 0
             and epochs_without_improvement >= args.early_stopping_patience
@@ -834,24 +847,13 @@ def main() -> None:
     (output_dir / f"summary_{run_name}.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
+    publish_run_summary(family="tile_eaf", stage="forecaster", run_name=run_name, args=args, summary=summary)
     if args.profile_json:
         profile_path = Path(args.profile_json).expanduser().resolve()
         profile_path.parent.mkdir(parents=True, exist_ok=True)
         profile_path.write_text(
             json.dumps(
-                {
-                    "run_name": run_name,
-                    "epochs": [
-                        {
-                            "epoch": row["epoch"],
-                            "train_tiles_per_second": row["train"]["tiles_per_second"],
-                            "val_tiles_per_second": row["val"]["tiles_per_second"],
-                            "train_phase_seconds": row["train"]["phase_seconds"],
-                            "val_phase_seconds": row["val"]["phase_seconds"],
-                        }
-                        for row in history
-                    ],
-                },
+                {"run_name": run_name, **build_tile_eaf_profile(history)},
                 indent=2,
             ),
             encoding="utf-8",

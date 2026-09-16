@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
+from src.wsi_pipeline.numpy_store import array_names, read_array
 
 try:
     import h5py
@@ -149,7 +150,16 @@ def read_artifact_tensor(
     """Read one tensor from a supported attention/coordinate artifact."""
 
     artifact_path = Path(path)
-    if artifact_path.suffix.lower() in _H5_SUFFIXES:
+    if artifact_path.suffix == ".npyd":
+        names = array_names(artifact_path)
+        candidates = (key,) if key is not None else fallback_keys
+        selected = next((candidate for candidate in candidates if candidate in names), None)
+        if selected is None and key is None and len(names) == 1:
+            selected = names[0]
+        if selected is None:
+            raise KeyError(f"No matching array in {artifact_path}; available={names}")
+        tensor = torch.as_tensor(np.asarray(read_array(artifact_path, selected)))
+    elif artifact_path.suffix.lower() in _H5_SUFFIXES:
         tensor = _read_h5_tensor(
             artifact_path,
             key=key,

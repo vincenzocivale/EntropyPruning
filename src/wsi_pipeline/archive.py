@@ -309,7 +309,7 @@ def release_preconditions(
     future, explicit ``release-raw`` command has one canonical place to ask
     "is it safe yet?" — implementing that command is out of scope until an
     operator explicitly wants raw deletion, per the cold-archive policy in
-    docs/offline_eaf_pipeline.md.
+    docs/data_layout.md.
     """
 
     checks: dict[str, Any] = {}

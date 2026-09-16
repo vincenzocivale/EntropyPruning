@@ -4,7 +4,7 @@ Reads, per slide, one of two input bags (`WSIForecasterManifestConfig.hidden_lay
 selects which):
 
 - default (`hidden_layer=None`): the tile encoder's final embeddings
-  (`tile_embeddings`, Tile-EAF cache, see `docs/offline_eaf_pipeline.md`) --
+  (`tile_embeddings`, Tile-EAF cache, see `docs/pipeline.md`) --
   context-free per-tile features, identical regardless of the slide they sit in.
 - `hidden_layer=k`: TITAN's own residual-stream output at vision-encoder block
   `k` (`auxiliary/hidden_layer_{k:03d}` in the wsi_eaf output file, produced by
@@ -25,7 +25,6 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-import h5py
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -33,6 +32,7 @@ from torch.utils.data import Dataset
 from src.data.wsi.attention import ManifestAttentionSource, align_attention_to_bag
 from src.data.wsi.bag import WSIBag
 from src.wsi_pipeline.attention_signal import SignalDiscoveryConfig, assign_case_splits
+from src.wsi_pipeline.numpy_store import array_names, read_array
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,8 @@ class WSIForecasterManifestConfig:
     ``$EAF_WSI_ROOT/caches/tile_eaf/<dataset>/<tile_encoder>/<cache_id>`` and
     ``$EAF_WSI_ROOT/caches/wsi_eaf/<dataset>/<tile_encoder>__<wsi_encoder>``
     (see `docs/data_layout.md`). Both are expected to contain one
-    subdirectory per cohort, each holding one HDF5 file per slide, with
+    subdirectory per cohort, each holding one `.npyd` directory per slide
+    (or a legacy HDF5 file during migration), with
     matching filenames across the two roots (the WSI-EAF writer records its
     source tile cache path in ``source_tile_cache`` for exactly this pairing).
     """
@@ -53,12 +54,18 @@ class WSIForecasterManifestConfig:
     attention_key: str = "attention/global_to_tiles_mass_share"
     target_layer: int = -1
     cohorts: tuple[str, ...] | None = None
+    # HISTAI subsets excluded regardless of `cohorts` (e.g. the CLI default
+    # ("HISTAI-mixed", "HISTAI-skin-b2") mirroring train_wsi_tile_eaf_online.py's
+    # --exclude-cohort -- the two largest/slowest-to-download subsets, not yet
+    # available in every environment). Applied on top of the `cohorts` allowlist,
+    # not instead of it.
+    exclude_cohorts: tuple[str, ...] | None = None
     # If set, the forecaster's input bag is TITAN's own intermediate hidden state at
     # this 0-based vision-encoder block index (``auxiliary/hidden_layer_{layer:03d}``
     # in the wsi_eaf output file, see `TitanAttentionCaptureConfig.hidden_layers` /
     # `wsi_eaf_infer_wsi_fm.py --titan-hidden-layer`), already mapped to input-tile
     # order -- instead of the tile encoder's context-free `tile_embeddings` from
-    # `tile_eaf_root`. See docs/offline_eaf_pipeline.md and
+    # `tile_eaf_root`. See docs/pipeline.md and
     # src/models/wsi/dense_forecaster.py for why this exists.
     hidden_layer: int | None = None
 
@@ -68,8 +75,13 @@ def build_manifest(config: WSIForecasterManifestConfig) -> pd.DataFrame:
     slide with columns: slide_id, case_id, project, tile_path, attention_path.
     """
     rows: list[dict] = []
+    exclude = set(config.exclude_cohorts or ())
     cohort_dirs = sorted(
-        d for d in config.wsi_eaf_root.iterdir() if d.is_dir() and (config.cohorts is None or d.name in config.cohorts)
+        d
+        for d in config.wsi_eaf_root.iterdir()
+        if d.is_dir()
+        and (config.cohorts is None or d.name in config.cohorts)
+        and d.name not in exclude
     )
     for cohort_dir in cohort_dirs:
         cohort = cohort_dir.name
@@ -77,7 +89,9 @@ def build_manifest(config: WSIForecasterManifestConfig) -> pd.DataFrame:
         if not tile_cohort_dir.is_dir():
             continue
         attn_stems = {p.stem: p for p in cohort_dir.glob("*.h5")}
+        attn_stems.update({p.stem: p for p in cohort_dir.glob("*.npyd")})
         tile_stems = {p.stem: p for p in tile_cohort_dir.glob("*.h5")}
+        tile_stems.update({p.stem: p for p in tile_cohort_dir.glob("*.npyd")})
         for stem in sorted(set(attn_stems) & set(tile_stems)):
             rows.append(
                 {
@@ -142,9 +156,8 @@ def assign_splits(
 
 
 def _load_tile_eaf_bag(slide_id: str, path: Path) -> WSIBag:
-    with h5py.File(path, "r") as handle:
-        tile_features = torch.from_numpy(handle["tile_embeddings"][...]).to(torch.float32)
-        coords = torch.from_numpy(handle["coords"][...]).to(torch.long) if "coords" in handle else None
+    tile_features = torch.from_numpy(read_array(path, "tile_embeddings")).to(torch.float32)
+    coords = torch.from_numpy(read_array(path, "coords")).to(torch.long) if "coords" in array_names(path) else None
     return WSIBag(slide_id=slide_id, tile_features=tile_features, coords=coords)
 
 
@@ -153,12 +166,12 @@ def _load_titan_hidden_bag(slide_id: str, path: Path, layer: int) -> WSIBag:
     capture code, see `titan_attention.py::capture_titan_attention`) as the bag's
     input features, from the same wsi_eaf output file the attention target reads."""
     key = f"hidden_layer_{layer:03d}"
-    with h5py.File(path, "r") as handle:
-        if "auxiliary" not in handle or key not in handle["auxiliary"]:
-            available = sorted(handle["auxiliary"].keys()) if "auxiliary" in handle else []
-            raise KeyError(f"{key!r} not found in {path}'s auxiliary group; available={available}")
-        tile_features = torch.from_numpy(handle["auxiliary"][key][...]).to(torch.float32)
-        coords = torch.from_numpy(handle["coords"][...]).to(torch.long) if "coords" in handle else None
+    names = array_names(path)
+    if f"auxiliary/{key}" not in names:
+        available = sorted(name.removeprefix("auxiliary/") for name in names if name.startswith("auxiliary/"))
+        raise KeyError(f"{key!r} not found in {path}'s auxiliary group; available={available}")
+    tile_features = torch.from_numpy(read_array(path, f"auxiliary/{key}")).to(torch.float32)
+    coords = torch.from_numpy(read_array(path, "coords")).to(torch.long) if "coords" in names else None
     if coords is None:
         raise KeyError(f"{path} has no top-level coords dataset; required to align hidden-layer bags")
     return WSIBag(slide_id=slide_id, tile_features=tile_features, coords=coords)

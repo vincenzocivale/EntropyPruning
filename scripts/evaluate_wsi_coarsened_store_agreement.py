@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data.wsi.h5_feature_store import H5WSIFeatureStore
+from src.data.wsi import open_feature_store
 from src.models.wsi import load_abmil_classifier_checkpoint
 
 
@@ -133,8 +133,8 @@ def _mean(rows: list[dict[str, Any]], key: str) -> float | None:
 def main() -> int:
     args = parse_args()
     device = _resolve_device(args.device)
-    full_store = H5WSIFeatureStore(args.full_feature_store)
-    coarsened_store = H5WSIFeatureStore(args.coarsened_feature_store)
+    full_store = open_feature_store(args.full_feature_store, read_only=True)
+    coarsened_store = open_feature_store(args.coarsened_feature_store, read_only=True)
 
     full_ids = full_store.slide_ids()
     coarsened_ids = set(coarsened_store.slide_ids())

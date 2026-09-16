@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 
-_ALLOWED_H5_SUFFIXES = {".h5", ".hdf5"}
+_ALLOWED_H5_SUFFIXES = {".h5", ".hdf5", ".npyd"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +91,7 @@ def _slide_id_from_path(path: Path) -> str:
 
 def _discover_features(features_dir: Path, feature_glob: str) -> dict[str, Path]:
     paths = sorted(path for path in features_dir.glob(feature_glob) if path.is_file())
+    paths += sorted(path for path in features_dir.glob("*.npyd") if path.is_dir())
 
     if not paths:
         raise ValueError(
@@ -105,9 +106,10 @@ def _discover_features(features_dir: Path, feature_glob: str) -> dict[str, Path]
             continue
 
         slide_id = _slide_id_from_path(path)
-        if slide_id in records:
+        if slide_id in records and path.suffix == records[slide_id].suffix:
             duplicates.append(slide_id)
-        records[slide_id] = path
+        if slide_id not in records or path.suffix == ".npyd":
+            records[slide_id] = path
 
     if not records:
         raise ValueError(
@@ -129,9 +131,9 @@ def _discover_coords(coords_dir: Path | None) -> dict[str, Path]:
 
     paths = sorted(
         path
-        for suffix in ("*.h5", "*.hdf5")
+        for suffix in ("*.h5", "*.hdf5", "*.npyd")
         for path in coords_dir.glob(suffix)
-        if path.is_file()
+        if path.is_file() or path.suffix == ".npyd" and path.is_dir()
     )
 
     records: dict[str, Path] = {}
@@ -139,9 +141,10 @@ def _discover_coords(coords_dir: Path | None) -> dict[str, Path]:
 
     for path in paths:
         slide_id = _slide_id_from_path(path)
-        if slide_id in records:
+        if slide_id in records and path.suffix == records[slide_id].suffix:
             duplicates.append(slide_id)
-        records[slide_id] = path
+        if slide_id not in records or path.suffix == ".npyd":
+            records[slide_id] = path
 
     if duplicates:
         raise ValueError(

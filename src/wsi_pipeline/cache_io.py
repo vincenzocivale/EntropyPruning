@@ -1,4 +1,4 @@
-"""HDF5 I/O for offline Tile-EAF and WSI-EAF teacher caches."""
+"""NumPy-first I/O for offline Tile-EAF and WSI-EAF teacher caches."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .cache_contracts import TileCacheSpec, WSICacheSpec
+from .numpy_store import NumpyStoreWriter, array_names, read_array, read_metadata
 
 
 def _deps():
@@ -55,7 +56,7 @@ def _mkstemp_beside(path: Path) -> Path:
     return Path(tmp_name)
 
 
-class TileCacheWriter:
+class _H5TileCacheWriter:
     """Append tile-teacher batches to one slide-level cache without keeping all tiles in RAM.
 
     Writes go to a sibling ``.tmp`` file; the final path only appears via an atomic
@@ -178,13 +179,85 @@ class TileCacheWriter:
         else:
             self._tmp_path.unlink(missing_ok=True)
 
-    def __enter__(self) -> "TileCacheWriter":
+    def __enter__(self) -> "_H5TileCacheWriter":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         # Only publish the cache at its real path if the batch loop finished cleanly;
         # on any exception (including OOM) the tmp file is dropped and `self.path`
         # never appears, so resume logic never mistakes a partial run for a valid cache.
+        self.close(mark_complete=exc_type is None)
+
+
+class TileCacheWriter:
+    """Append to a NumPy cache; historical ``.h5`` paths remain supported."""
+
+    def __init__(self, path: str | Path, spec: TileCacheSpec, *, slide_id: str,
+                 case_id: str, compression: str | None = None, expected_n: int | None = None) -> None:
+        if Path(path).suffix != ".npyd":
+            self._legacy = _H5TileCacheWriter(path, spec, slide_id=slide_id, case_id=case_id,
+                                              compression=compression, expected_n=expected_n)
+            return
+        self._legacy = None
+        if expected_n is None or expected_n < 0:
+            raise ValueError("NumPy tile cache requires non-negative expected_n")
+        if spec.dtype not in {"float16", "float32"}:
+            raise ValueError(f"Unsupported tile-cache dtype: {spec.dtype}")
+        self.path = Path(path)
+        self.expected_n = expected_n
+        self.count = 0
+        self.store = NumpyStoreWriter(path, {
+            "schema_version": spec.schema_version, "kind": "tile_eaf", "complete": False,
+            "slide_id": slide_id, "case_id": case_id,
+            "spec_json": _jsonable_metadata(spec.metadata()), "n_tiles": expected_n,
+        }, replace=True)
+        self._arrays: dict[str, Any] = {}
+        self._dtype = spec.dtype
+
+    def append(self, *, coords: Any, final_attention: Any, tile_embeddings: Any) -> None:
+        if self._legacy is not None:
+            self._legacy.append(coords=coords, final_attention=final_attention,
+                                tile_embeddings=tile_embeddings)
+            self.count = self._legacy.count
+            return
+        _, np = _deps()
+        values = {
+            "coords": np.asarray(coords, dtype="int32"),
+            "final_attention": np.asarray(final_attention, dtype=self._dtype),
+            "tile_embeddings": np.asarray(tile_embeddings, dtype=self._dtype),
+        }
+        sizes = {value.shape[0] for value in values.values()}
+        if len(sizes) != 1:
+            raise ValueError("Tile-cache batch sizes differ")
+        size = sizes.pop()
+        if self.count + size > self.expected_n:
+            raise ValueError("Tile cache exceeds expected_n")
+        for key, value in values.items():
+            if key not in self._arrays:
+                self._arrays[key] = self.store.memmap(key, (self.expected_n,) + value.shape[1:], value.dtype)
+            target = self._arrays[key]
+            if target.shape[1:] != value.shape[1:]:
+                raise ValueError(f"Shape changed for {key}")
+            target[self.count:self.count + size] = value
+        self.count += size
+
+    def close(self, *, mark_complete: bool = True) -> None:
+        if self._legacy is not None:
+            self._legacy.close(mark_complete=mark_complete)
+            return
+        if mark_complete and self.count != self.expected_n:
+            self._arrays.clear()
+            self.store.close(publish=False)
+            raise RuntimeError(f"Incomplete cache: wrote {self.count}, expected {self.expected_n}")
+        for array in self._arrays.values():
+            array.flush()
+        self._arrays.clear()
+        self.store.close(publish=mark_complete)
+
+    def __enter__(self) -> "TileCacheWriter":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.close(mark_complete=exc_type is None)
 
 
@@ -212,6 +285,20 @@ def write_wsi_cache(
         raise ValueError(
             "WSI cache first dimension must match for coords/tile_embeddings/tile_scores"
         )
+    if path.suffix == ".npyd":
+        if raw_attention is not None and not spec.store_raw_attention:
+            raise ValueError("raw_attention supplied but store_raw_attention=False")
+        with NumpyStoreWriter(path, {
+            "schema_version": spec.schema_version, "kind": "wsi_eaf", "complete": False,
+            "slide_id": slide_id, "case_id": case_id, "n_tiles": n,
+            "spec_json": _jsonable_metadata(spec.metadata()),
+        }, replace=True) as store:
+            for key, value in {"coords": coords, "tile_embeddings": tile_embeddings,
+                               "tile_scores": tile_scores, "wsi_embedding": wsi_embedding}.items():
+                store.write(key, value)
+            if raw_attention is not None:
+                store.write("raw_attention", np.asarray(raw_attention, dtype="float16"))
+        return path
     tmp_path = _mkstemp_beside(path)
     try:
         with h5py.File(tmp_path, "w") as handle:
@@ -244,6 +331,29 @@ def write_wsi_cache(
 
 def validate_cache(path: str | Path, *, expected_kind: str | None = None) -> dict[str, Any]:
     path = Path(path)
+    if path.suffix == ".npyd":
+        attrs = read_metadata(path)
+        if not attrs.get("complete", False):
+            raise ValueError(f"Cache is not marked complete: {path}")
+        kind = str(attrs.get("kind", ""))
+        if expected_kind and kind != expected_kind:
+            raise ValueError(f"Expected {expected_kind}, found {kind}")
+        required = ({"coords", "final_attention", "tile_embeddings"} if kind == "tile_eaf"
+                    else {"coords", "tile_embeddings", "tile_scores", "wsi_embedding"} if kind == "wsi_eaf"
+                    else None)
+        if required is None:
+            raise ValueError(f"Unknown cache kind: {kind}")
+        names = set(array_names(path))
+        if required - names:
+            raise ValueError(f"Missing cache datasets: {sorted(required - names)}")
+        shapes = {name: tuple(read_array(path, name, mmap=True).shape) for name in names}
+        n = shapes["coords"][0]
+        for name in required - {"wsi_embedding"}:
+            if shapes[name][0] != n:
+                raise ValueError(f"First-dimension mismatch for {name}")
+        return {"kind": kind, "slide_id": str(attrs.get("slide_id", "")),
+                "case_id": str(attrs.get("case_id", "")), "n_tiles": n,
+                "datasets": shapes, "spec": json.loads(str(attrs["spec_json"]))}
     with open_h5_with_retry(path, "r") as handle:
         if not bool(handle.attrs.get("complete", False)):
             raise ValueError(f"Cache is not marked complete (partial/interrupted write): {path}")
@@ -275,6 +385,10 @@ def validate_cache(path: str | Path, *, expected_kind: str | None = None) -> dic
 
 def n_coords_in_registry(coords_path: str | Path) -> int:
     """Row count of a TRIDENT ``*_patches.h5`` coordinate file (``coords`` dataset)."""
+    from .numpy_store import preferred_path
+    coords_path = preferred_path(coords_path)
+    if Path(coords_path).suffix == ".npyd":
+        return int(read_array(coords_path, "coords", mmap=True).shape[0])
     with open_h5_with_retry(Path(coords_path), "r") as handle:
         return int(handle["coords"].shape[0])
 
@@ -293,7 +407,7 @@ def tile_cache_status(
     so callers can uniformly decide "rebuild this slide" without a try/except per check.
     """
     path = Path(path)
-    if not path.is_file():
+    if not path.exists():
         return {"ok": False, "reason": "missing"}
     try:
         info = validate_cache(path, expected_kind="tile_eaf")

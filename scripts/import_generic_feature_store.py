@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import csv
 import json
 import sys
@@ -15,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.data.wsi import (
     GenericFeatureSlideRecord,
-    H5WSIFeatureStore,
+    open_feature_store,
     load_generic_feature_slide_record,
 )
 
@@ -134,12 +135,15 @@ def main() -> int:
     args = parse_args()
 
     if args.output_feature_store.exists() and args.overwrite:
-        args.output_feature_store.unlink()
+        if args.output_feature_store.is_dir():
+            shutil.rmtree(args.output_feature_store)
+        else:
+            args.output_feature_store.unlink()
 
     args.output_feature_store.parent.mkdir(parents=True, exist_ok=True)
 
     records = _read_manifest(args.manifest)
-    output_store = H5WSIFeatureStore(args.output_feature_store)
+    output_store = open_feature_store(args.output_feature_store)
 
     n_slides = 0
     n_tiles_total = 0

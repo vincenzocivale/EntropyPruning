@@ -20,6 +20,16 @@ def main() -> int:
     parser.add_argument("--overlap", type=int, default=0)
     parser.add_argument("--custom-list-of-wsis", type=Path)
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help=(
+            "Cap on TRIDENT's worker pool. TRIDENT otherwise scales with "
+            "os.cpu_count(), which on a large shared machine spawns hundreds "
+            "of ephemeral processes per slide. Recommended on shared servers."
+        ),
+    )
+    parser.add_argument(
         "--temp-dir",
         type=Path,
         help=(
@@ -32,6 +42,7 @@ def main() -> int:
     group.add_argument("--remove-artifacts", action="store_true")
     group.add_argument("--remove-penmarks", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-convert-numpy", action="store_true", help="Keep TRIDENT's native HDF5 only")
     args = parser.parse_args()
     config = TridentConfig(
         trident_repo=args.trident_repo,
@@ -44,6 +55,8 @@ def main() -> int:
         overlap=args.overlap,
         custom_list_of_wsis=args.custom_list_of_wsis,
         temp_dir=args.temp_dir,
+        max_workers=args.max_workers,
+        convert_numpy=not args.no_convert_numpy,
         search_nested=not args.no_search_nested,
         remove_artifacts=args.remove_artifacts,
         remove_penmarks=args.remove_penmarks,

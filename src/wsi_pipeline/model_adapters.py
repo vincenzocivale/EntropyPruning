@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -13,7 +14,7 @@ class TileTeacherOutput:
     Used for numeric-equivalence testing and one-off inspection. Production code paths
     use the split methods below instead: ``extract_final`` (offline cache building --
     ``early_tokens`` is deliberately NOT part of the permanent cache, see
-    ``docs/offline_eaf_pipeline.md`` -- storage cost) and ``extract_early`` (an
+    ``docs/pipeline.md`` -- storage contract) and ``extract_early`` (an
     efficient, early-exit partial forward run ONLINE during EAF Tile training, never
     persisted).
     """
@@ -353,7 +354,7 @@ class HookedViTTileTeacherAdapter:
         an early exit raised from inside the block's own ``forward_hook``, which
         propagates up through the encoder's call stack. Meant to be called online,
         every EAF Tile training step, instead of reading a cached ``early_tokens``
-        array (which is no longer persisted -- see docs/offline_eaf_pipeline.md).
+        array (which is no longer persisted -- see docs/pipeline.md).
 
         Returned tensor stays on its compute device/dtype (no forced CPU/fp16 cast,
         unlike extract_final): this is a live teacher signal feeding straight into a
@@ -451,6 +452,133 @@ class HookedViTTileTeacherAdapter:
             early_tokens=early,
             final_attention=target,
             tile_embeddings=tile_embeddings,
+        )
+
+
+class PrunedLoRATileTeacherAdapter:
+    """Tile teacher backed by a tile-EAF pruned+LoRA-fine-tuned encoder (a Stage-2
+    checkpoint from ``scripts/finetune_wsi_tile_encoder_pruned_online.py``), instead
+    of the frozen base encoder ``HookedViTTileTeacherAdapter`` wraps directly.
+
+    ``tile_embeddings`` come from the real forecaster-guided-pruned + LoRA forward
+    pass (``src.models.online_tile_eaf.PrunedLoRAEncoder``) -- exactly what a
+    deployment that prunes the tile encoder would hand to a downstream WSI-FM.
+    ``final_attention`` has NO teacher meaning here: pruning has already discarded
+    most patch tokens by the model's own final layer, and the remaining bag no
+    longer aligns 1:1 with a fixed patch grid. It is filled with a uniform
+    placeholder distribution purely to satisfy the shared ``tile_eaf`` cache schema
+    (``cache_contracts.py`` requires ``coords``/``final_attention``/``tile_embeddings``
+    all present with matching first dimension). A cache built this way must never be
+    read as a Tile-EAF Stage-1 forecaster training target -- it exists only to feed
+    WSI-EAF cache-building (``wsi_eaf_infer_wsi_fm.py``), which reads
+    ``coords``/``tile_embeddings`` only. See docs/pipeline.md.
+
+    Every construction argument except ``pruned_adapter_ckpt`` is optional and
+    auto-resolved from that checkpoint's own recorded ``config``/
+    ``forecaster_checkpoint`` (the same fields
+    ``finetune_wsi_tile_encoder_pruned_online.py`` writes) -- mirroring the
+    auto-resolve-from-checkpoint pattern in
+    ``scripts/train_multi_thunder_classifier.py``'s ``--pruned-adapter-ckpt`` path.
+    """
+
+    def __init__(
+        self,
+        *,
+        pruned_adapter_ckpt: Any,
+        forecaster_ckpt: Any = None,
+        thunder_model_name: str | None = None,
+        prune_layer: int | None = None,
+        keep_ratio: float | None = None,
+        lora_r: int | None = None,
+        lora_alpha: int | None = None,
+        lora_dropout: float | None = None,
+        revision: str = "unknown",
+        device: Any = None,
+    ) -> None:
+        import torch
+
+        from src.models import AttentionForecaster, ThunderBackboneAdapter
+        from src.models.online_tile_eaf import PrunedLoRAEncoder, unwrap_checkpoint_state
+
+        pruned_payload = torch.load(pruned_adapter_ckpt, map_location="cpu", weights_only=False)
+        config = pruned_payload.get("config", {})
+
+        resolved_model_name = thunder_model_name or config.get("model_name")
+        if not resolved_model_name:
+            raise ValueError(
+                f"--thunder-model-name not given and {pruned_adapter_ckpt} does not "
+                "record a 'model_name' in its config"
+            )
+        resolved_forecaster_ckpt = forecaster_ckpt or pruned_payload.get("forecaster_checkpoint")
+        if not resolved_forecaster_ckpt:
+            raise ValueError(
+                f"--forecaster-ckpt not given and {pruned_adapter_ckpt} does not "
+                "record a 'forecaster_checkpoint'"
+            )
+        resolved_prune_layer = prune_layer if prune_layer is not None else config.get("prune_layer")
+        resolved_keep_ratio = keep_ratio if keep_ratio is not None else config.get("keep_ratio")
+        if resolved_prune_layer is None or resolved_keep_ratio is None:
+            raise ValueError(
+                f"--prune-layer/--keep-ratio not given and not resolvable from {pruned_adapter_ckpt}'s config"
+            )
+        resolved_lora_r = lora_r if lora_r is not None else config.get("lora_r", 8)
+        resolved_lora_alpha = lora_alpha if lora_alpha is not None else config.get("lora_alpha", 32)
+        resolved_lora_dropout = lora_dropout if lora_dropout is not None else config.get("lora_dropout", 0.05)
+
+        hooked = HookedViTTileTeacherAdapter.from_thunder_model(
+            resolved_model_name, revision=revision, device=device
+        )
+        self.model = hooked.model
+        self.transform = hooked.transform
+        self.input_size = hooked.input_size
+        self.name = hooked.name
+        run_tag = pruned_payload.get("run_name") or Path(str(pruned_adapter_ckpt)).parent.name
+        # Encoded into `.revision` (part of TileCacheSpec.cache_id) so a pruned-input
+        # cache never hashes to the same cache_id as a base frozen-encoder cache, even
+        # if both share `.name`/`input_mag`/`patch_size`/etc.
+        self.revision = f"pruned:{run_tag}"
+
+        thunder_adapter = ThunderBackboneAdapter(hooked.model, transform=hooked.transform)
+        self.n_patches = thunder_adapter.n_patches
+
+        forecaster = AttentionForecaster(
+            embed_dim=thunder_adapter.embed_dim,
+            hidden=config.get("hidden", 256),
+            n_heads=config.get("n_heads", 4),
+            n_layers=config.get("n_layers", 2),
+            dropout=0.0,  # inference only
+        )
+        forecaster_payload = torch.load(resolved_forecaster_ckpt, map_location="cpu", weights_only=False)
+        forecaster.load_state_dict(unwrap_checkpoint_state(forecaster_payload), strict=True)
+
+        pruned_encoder = PrunedLoRAEncoder(
+            hooked.model, thunder_adapter, forecaster,
+            prune_layer=int(resolved_prune_layer), keep_ratio=float(resolved_keep_ratio),
+            lora_r=int(resolved_lora_r), lora_alpha=int(resolved_lora_alpha), lora_dropout=float(resolved_lora_dropout),
+        )
+        pruned_encoder.load_trainable_state_dict(pruned_payload["trainable_state_dict"])
+        if device is not None:
+            pruned_encoder = pruned_encoder.to(device)
+        pruned_encoder.eval()
+        self.pruned_encoder = pruned_encoder
+        self.prune_layer = int(resolved_prune_layer)
+        self.keep_ratio = float(resolved_keep_ratio)
+        self.forecaster_checkpoint = str(resolved_forecaster_ckpt)
+
+    def to(self, device: Any) -> "PrunedLoRATileTeacherAdapter":
+        self.pruned_encoder = self.pruned_encoder.to(device)
+        return self
+
+    def extract_final(self, images: Any) -> TileTeacherFinalOutput:
+        import torch
+
+        with torch.inference_mode():
+            tile_embeddings = self.pruned_encoder(images)
+        batch = int(images.shape[0])
+        final_attention = torch.full((batch, self.n_patches), 1.0 / self.n_patches, dtype=torch.float16)
+        return TileTeacherFinalOutput(
+            final_attention=final_attention.cpu(),
+            tile_embeddings=tile_embeddings.detach().to("cpu", dtype=torch.float16),
         )
 
 

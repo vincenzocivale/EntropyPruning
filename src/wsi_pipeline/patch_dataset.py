@@ -8,6 +8,7 @@ from typing import Callable, Iterator, Sequence
 import h5py
 import numpy as np
 import torch
+from .numpy_store import preferred_path, read_array, read_metadata
 from PIL import Image
 from torch.utils.data import Dataset, Sampler
 
@@ -31,11 +32,19 @@ class OpenSlideCoordinateDataset(Dataset):
         self.output_size = int(output_size)
         if self.output_size <= 0:
             raise ValueError("output_size must be positive")
-        with h5py.File(self.coords_path, "r") as handle:
-            self.coords = np.asarray(handle["coords"][:], dtype=np.int64)
-            attr_value = handle["coords"].attrs.get("patch_size_level0")
+        resolved_coords = preferred_path(self.coords_path)
+        if resolved_coords.suffix == ".npyd":
+            self.coords = np.asarray(read_array(resolved_coords, "coords"), dtype=np.int64)
+            attrs = read_metadata(resolved_coords)
+            attr_value = attrs.get("_hdf5_object_attrs", {}).get("coords", {}).get("patch_size_level0")
             if attr_value is None:
-                attr_value = handle.attrs.get("patch_size_level0")
+                attr_value = attrs.get("patch_size_level0")
+        else:
+            with h5py.File(resolved_coords, "r") as handle:
+                self.coords = np.asarray(handle["coords"][:], dtype=np.int64)
+                attr_value = handle["coords"].attrs.get("patch_size_level0")
+                if attr_value is None:
+                    attr_value = handle.attrs.get("patch_size_level0")
         self.patch_size_level0 = int(patch_size_level0 or attr_value or output_size)
         self.openslide_cache_bytes = int(openslide_cache_bytes)
         if self.openslide_cache_bytes < 0:

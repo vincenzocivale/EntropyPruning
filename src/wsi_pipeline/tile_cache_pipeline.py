@@ -14,7 +14,7 @@
 
 The ``tile_embeddings`` array this module writes is the same shared artifact WSI-EAF
 consumes as input to its own teacher cache -- it is not exclusive to Tile-EAF. See
-``docs/offline_eaf_pipeline.md``.
+``docs/pipeline.md``.
 
 This module makes exactly one full forward pass per tile batch when *building* the
 cache: ``final_attention`` (the Tile-EAF teacher target) and ``tile_embeddings`` (final
@@ -72,7 +72,12 @@ class TileCacheRunConfig:
 
 
 def cache_path_for(output_dir: Path, slide_id: str) -> Path:
-    return Path(output_dir) / f"{slide_id}.h5"
+    return Path(output_dir) / f"{slide_id}.npyd"
+
+
+def _resume_path(output_dir: Path, slide_id: str) -> Path:
+    modern = cache_path_for(output_dir, slide_id)
+    return modern if modern.exists() else modern.with_suffix(".h5") if modern.with_suffix(".h5").exists() else modern
 
 
 # Revision tags recorded in every TileCacheSpec/cache_id. Exposed as constants (not
@@ -237,12 +242,13 @@ def cache_one_slide(
     """
     output_path = cache_path_for(config.output_dir, item.slide_id)
     if not config.overwrite:
-        status = tile_cache_status(output_path, coords_path=item.coords_path, spec=spec)
+        existing_path = _resume_path(config.output_dir, item.slide_id)
+        status = tile_cache_status(existing_path, coords_path=item.coords_path, spec=spec)
         if status["ok"]:
             return {
                 "slide_id": item.slide_id,
                 "status": "skipped_valid",
-                "path": str(output_path),
+                "path": str(existing_path),
                 **status,
             }
 
@@ -558,7 +564,7 @@ def cache_many_slides(
     rows_by_id: dict[str, dict[str, Any]] = {}
     pending: list[TileCacheItem] = []
     for item in tqdm(item_list, desc="validate tile caches", unit="slide"):
-        output_path = cache_path_for(config.output_dir, item.slide_id)
+        output_path = _resume_path(config.output_dir, item.slide_id)
         if not config.overwrite:
             status = tile_cache_status(
                 output_path, coords_path=item.coords_path, spec=spec

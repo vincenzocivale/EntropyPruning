@@ -8,7 +8,7 @@ Attention Block (ISAB) pattern: landmarks first summarize the whole bag
 (tile -> landmark, O(N*K)), refine among themselves (O(K^2), K is small), then
 broadcast context back to every tile (landmark -> tile, O(N*K)).
 
-See docs/offline_eaf_pipeline.md and the WSI-EAF attention-signal investigation
+See docs/pipeline.md and the WSI-EAF attention-signal analysis
 notes for why this exists: isolated per-tile statistics (centroid distance,
 embedding norm, prototype prevalence, intra-tile heterogeneity, spatial-
 neighbor dissimilarity) and even flexible case-disjoint kNN in the full

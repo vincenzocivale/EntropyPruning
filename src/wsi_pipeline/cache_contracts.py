@@ -14,7 +14,7 @@ CACHE_SCHEMA_VERSION = 2
 # `HookedViTTileTeacherAdapter.extract_early` -- a cheap early-exit partial forward
 # through blocks 0..early_layer only, never the full encoder -- against tile pixels
 # re-read from the (never-deleted) raw WSI. See
-# `src/wsi_pipeline/compact_cache_dataset.py` and docs/offline_eaf_pipeline.md. Only
+# `src/wsi_pipeline/compact_cache_dataset.py` and docs/pipeline.md. Only
 # `coords`, `final_attention`, `tile_embeddings` are written/required now.
 
 

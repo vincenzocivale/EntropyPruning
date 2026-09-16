@@ -12,6 +12,7 @@ import numpy as np
 from src.data.wsi.manifest import read_manifest
 
 from .cache_io import validate_cache
+from .numpy_store import preferred_path, read_array
 
 
 INDEX_FIELDS = ("slide_id", "cache_path", "n_tiles", "cache_id")
@@ -38,7 +39,9 @@ def build_tile_cache_index(
         root = Path(root_value).expanduser().resolve()
         if not root.is_dir():
             raise FileNotFoundError(f"Cache root does not exist: {root}")
-        for path in root.rglob("*.h5"):
+        for path in sorted(list(root.rglob("*.npyd")) + list(root.rglob("*.h5"))):
+            if path.suffix == ".h5" and preferred_path(path) != path:
+                continue
             path = path.resolve()
             if path in seen_cache_paths:
                 continue
@@ -79,9 +82,8 @@ def build_tile_cache_index(
         if not coords_path.is_absolute():
             base = Path(data_root).expanduser().resolve() if data_root else slides_path.parent
             coords_path = (base / coords_path).resolve()
-        with h5py.File(coords_path, "r") as coords_handle, h5py.File(cache_path, "r") as cache_handle:
-            source_coords = np.asarray(coords_handle["coords"][:, :2])
-            cached_coords = np.asarray(cache_handle["coords"][:, :2])
+        source_coords = np.asarray(read_array(preferred_path(coords_path), "coords")[:, :2])
+        cached_coords = np.asarray(read_array(cache_path, "coords")[:, :2])
         if not np.array_equal(source_coords, cached_coords):
             raise RuntimeError(
                 f"Coordinate order mismatch for {slide_id}: {coords_path} vs {cache_path}"
@@ -119,5 +121,5 @@ def read_tile_cache_index(path: str | Path) -> dict[str, Path]:
             cache_path = (path.parent / cache_path).resolve()
         if not slide_id or slide_id in mapping:
             raise ValueError(f"Invalid or duplicate slide_id in {path}: {slide_id!r}")
-        mapping[slide_id] = cache_path
+        mapping[slide_id] = preferred_path(cache_path)
     return mapping

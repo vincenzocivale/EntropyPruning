@@ -3,7 +3,7 @@
 The permanent cache (``TileCacheWriter``/``eaf.py cache tile``) stores only ``coords``,
 ``final_attention`` and ``tile_embeddings`` -- ``early_tokens`` is deliberately not
 persisted (see ``CACHE_SCHEMA_VERSION`` v2 in ``cache_contracts.py`` and
-``docs/offline_eaf_pipeline.md`` for the storage-cost rationale). EAF Tile training needs
+``docs/pipeline.md`` for the storage contract). EAF Tile training needs
 ``early_tokens`` as its input, so it must be recomputed ONLINE, once per training step,
 from raw tile pixels re-read from the source WSI:
 
@@ -22,7 +22,7 @@ This keeps the expensive, full-forward quantities (``final_attention``,
 early-exit partial forward for ``early_tokens`` is the only thing that ever re-touches
 the encoder during training -- never the full 24-block CONCH forward.
 
-Caveat this creates for the cold-archive/raw-release policy (``docs/offline_eaf_pipeline.md``
+Caveat this creates for the cold-archive/raw-release policy (``docs/data_layout.md``
 "Cold archive" section): EAF Tile training is no longer pixel-free once raw WSI access is
 released. It needs *some* source of tile pixels at every step -- today that is the
 original WSI via ``OpenSlideCoordinateDataset``; the cold-archive JPEGs are a documented
@@ -42,6 +42,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .cache_io import open_h5_with_retry
+from .numpy_store import read_array, read_metadata
 from .patch_dataset import OpenSlideCoordinateDataset
 from src.data.wsi_tile_stream import SlideRecord, WSIBalancedBatchSampler, WSITileDataset
 
@@ -79,12 +80,11 @@ class CompactTileTargetDataset(Dataset):
         self._pixels = OpenSlideCoordinateDataset(
             Path(wsi_path), Path(coords_path), transform, output_size=output_size
         )
-        with open_h5_with_retry(Path(compact_cache_path), "r") as handle:
-            if not bool(handle.attrs.get("complete", False)):
-                raise RuntimeError(f"Cache is not complete: {compact_cache_path}")
-            self.target_key = target_key
-            self.targets = np.asarray(handle[target_key][:], dtype=np.float32)
-            cached_coords = np.asarray(handle["coords"][:])
+        if not bool(read_metadata(compact_cache_path).get("complete", False)):
+            raise RuntimeError(f"Cache is not complete: {compact_cache_path}")
+        self.target_key = target_key
+        self.targets = np.asarray(read_array(compact_cache_path, target_key), dtype=np.float32)
+        cached_coords = read_array(compact_cache_path, "coords")
 
         if len(self._pixels) != len(self.targets):
             raise RuntimeError(
@@ -156,12 +156,15 @@ class CompactCachedWSITileDataset(WSITileDataset):
         if key in self._target_handles:
             handle = self._target_handles.pop(key)
         else:
-            handle = open_h5_with_retry(Path(key), "r")
+            handle = (read_array(Path(key), self.target_key, mmap=True)
+                      if Path(key).suffix == ".npyd" else open_h5_with_retry(Path(key), "r"))
         self._target_handles[key] = handle
         while len(self._target_handles) > self.target_cache_size:
             _, old = self._target_handles.popitem(last=False)
-            old.close()
-        return torch.from_numpy(np.asarray(handle[self.target_key][coord_index], dtype=np.float32))
+            if hasattr(old, "close"):
+                old.close()
+        row = handle[coord_index] if Path(key).suffix == ".npyd" else handle[self.target_key][coord_index]
+        return torch.from_numpy(np.asarray(row, dtype=np.float32))
 
     def __getitem__(self, index: tuple[int, int]) -> tuple[torch.Tensor, torch.Tensor]:
         slide_index, coord_index = (int(index[0]), int(index[1]))
@@ -187,7 +190,8 @@ class CompactCachedWSITileDataset(WSITileDataset):
         if handles:
             for handle in handles.values():
                 try:
-                    handle.close()
+                    if hasattr(handle, "close"):
+                        handle.close()
                 except Exception:
                     pass
 
@@ -226,6 +230,9 @@ def build_compact_cache_tile_loaders(
         # require applying the identical transform to the target; use the exact
         # deterministic cache-time crop instead.
         augment=False, slide_cache_size=slide_cache_size,
+        # Every batch touches slides_per_batch distinct HDF5 files. A smaller
+        # handle LRU reopens all of them on each round over the same slide group.
+        target_cache_size=max(slide_cache_size, slides_per_batch),
         openslide_cache_bytes=openslide_cache_bytes,
         resize_to=resize_to,
         target_key=target_key,
@@ -233,6 +240,7 @@ def build_compact_cache_tile_loaders(
     val_dataset = CompactCachedWSITileDataset(
         split_records["val"], cache_paths, transform,
         augment=False, slide_cache_size=slide_cache_size,
+        target_cache_size=max(slide_cache_size, slides_per_batch),
         openslide_cache_bytes=openslide_cache_bytes,
         resize_to=resize_to,
         target_key=target_key,

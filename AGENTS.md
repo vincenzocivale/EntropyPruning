@@ -78,9 +78,9 @@ especially for CLI validation paths, feature-store I/O, cache I/O, and WSI batch
 
 The post-refactor repository should not retain manual debug/smoke scripts or obsolete WSI
 forecaster experiments once their useful behavior is covered by the unified CLI/tests.
-Before deleting a legacy script, verify that it is not imported by code/tests/docs and
-that any unique behavior has been migrated. See `docs/refactor_migration.md` for the
-current removal candidates.
+Before deleting a legacy script, verify that it is not imported by code, tests or
+documentation and that any unique behavior has been migrated. The supported workflow
+is documented in `docs/pipeline.md`.
 
 ## Commit & Pull Request Guidelines
 

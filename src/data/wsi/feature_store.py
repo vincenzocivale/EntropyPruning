@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
+from torch.utils.data import Dataset
+
 from src.data.wsi.bag import WSIBag
 
 
@@ -74,3 +76,20 @@ class InMemoryWSIFeatureStore(WSIFeatureStore):
                 f"got {type(bag).__name__}."
             )
         self._bags[bag.slide_id] = bag
+
+
+class FeatureStoreWSIBagDataset(Dataset):
+    """Expose selected bags from any :class:`WSIFeatureStore` as a dataset."""
+
+    def __init__(self, store: WSIFeatureStore, *, slide_ids: Iterable[str] | None = None) -> None:
+        self.store = store
+        self.slide_ids = tuple(slide_ids if slide_ids is not None else store.slide_ids())
+        missing = [slide_id for slide_id in self.slide_ids if not store.exists(slide_id)]
+        if missing:
+            raise KeyError(f"Feature store is missing slide ids: {missing[:5]}")
+
+    def __len__(self) -> int:
+        return len(self.slide_ids)
+
+    def __getitem__(self, index: int) -> WSIBag:
+        return self.store.read(self.slide_ids[index])

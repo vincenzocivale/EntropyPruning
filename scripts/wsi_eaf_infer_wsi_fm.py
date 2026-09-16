@@ -11,11 +11,7 @@ Bridges two schemas that currently don't talk to each other in this repo:
 - Output: ``eaf.wsi.fm_output.v1`` (``src/wsi_pipeline/io.py``), the schema
   ``scripts/wsi_extract_fm_outputs.py`` already writes.
 
-``scripts/wsi_extract_fm_outputs.py`` itself reads a *different*, now-removed
-input schema (``eaf.wsi.tile_features.v2``, written by the deleted
-``wsi_extract_tile_embeddings.py``) -- see
-``docs/wsi_preprocessing_attention_pipeline.md``'s superseded note. This
-script is the missing bridge: read tile embeddings straight from the current
+This script reads tile embeddings straight from the current
 Tile-EAF cache, run them through the same ``WSIModelAdapter`` implementations
 (``src/wsi_pipeline/wsi_models/``), and write output with the exact same
 writer (`write_wsi_output_record`) so downstream consumers of
@@ -35,7 +31,6 @@ import os
 import time
 from pathlib import Path
 
-import h5py
 import numpy as np
 import torch
 from tqdm.auto import tqdm
@@ -47,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.wsi_pipeline.cache_io import validate_cache  # noqa: E402
+from src.wsi_pipeline.numpy_store import read_array  # noqa: E402
 from src.wsi_pipeline.io import (  # noqa: E402
     WSIOutputRecord,
     output_is_complete,
@@ -65,10 +61,10 @@ def _read_tile_cache_features(path: Path) -> tuple[str, np.ndarray, np.ndarray]:
     into an `error` row instead of aborting the whole run.
     """
     validate_cache(path, expected_kind="tile_eaf")
-    with h5py.File(path, "r") as handle:
-        slide_id = str(handle.attrs["slide_id"])
-        coords = np.asarray(handle["coords"][:])
-        embeddings = np.asarray(handle["tile_embeddings"][:])
+    info = validate_cache(path, expected_kind="tile_eaf")
+    slide_id = info["slide_id"]
+    coords = read_array(path, "coords")
+    embeddings = read_array(path, "tile_embeddings")
     return slide_id, coords, embeddings
 
 
@@ -85,7 +81,7 @@ def extract_one(
     max_full_attention_tiles: int,
 ) -> dict:
     slide_id, coords, embeddings = _read_tile_cache_features(path)
-    output_path = output_dir / f"{slide_id}.h5"
+    output_path = output_dir / f"{slide_id}.npyd"
     if not overwrite and output_is_complete(output_path, "eaf.wsi.fm_output.v1"):
         return {"slide_id": slide_id, "path": str(output_path), "status": "skipped"}
 
@@ -143,7 +139,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tile-cache-dir", type=Path, required=True,
-        help="Per-subset directory of *.h5 files from `eaf.py cache tile` (e.g. "
+        help="Per-subset directory of *.npyd caches from `eaf.py cache tile` (legacy *.h5 is accepted; e.g. "
         "$EAF_WSI_ROOT/caches/tile_eaf/<dataset>/conch_v15/<cache_id>/<subset>)",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -188,11 +184,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    paths = sorted(p for p in args.tile_cache_dir.glob("*.h5"))
+    paths_by_stem = {p.stem: p for p in args.tile_cache_dir.glob("*.h5")}
+    paths_by_stem.update({p.stem: p for p in args.tile_cache_dir.glob("*.npyd")})
+    paths = sorted(paths_by_stem.values())
     if args.max_slides is not None:
         paths = paths[: args.max_slides]
     if not paths:
-        raise SystemExit(f"No .h5 tile-cache files found in {args.tile_cache_dir}")
+        raise SystemExit(f"No tile-cache files found in {args.tile_cache_dir}")
 
     if args.model == "feather":
         model = create_wsi_model("feather", model_id=args.feather_model, token=args.hf_token)

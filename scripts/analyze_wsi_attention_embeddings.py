@@ -33,7 +33,7 @@ from src.analysis.wsi_attention_embedding import (  # noqa: E402
 from src.data.wsi import (  # noqa: E402
     EmbeddedAttentionSource,
     FeatureStoreAttentionSource,
-    H5WSIFeatureStore,
+    open_feature_store,
     ManifestAttentionSource,
     align_attention_to_bag,
 )
@@ -206,9 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     tile_dir.mkdir(exist_ok=True)
     detail_dir.mkdir(exist_ok=True)
 
-    feature_store = H5WSIFeatureStore(args.feature_store, read_only=True)
+    feature_store = open_feature_store(args.feature_store, read_only=True)
     if args.attention_store is not None:
-        attention_store = H5WSIFeatureStore(args.attention_store, read_only=True)
+        attention_store = open_feature_store(args.attention_store, read_only=True)
         attention_source = FeatureStoreAttentionSource(attention_store)
         source_description = {"kind": "h5_attention_store", "path": str(args.attention_store)}
     elif args.attention_manifest is not None:

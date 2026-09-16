@@ -20,6 +20,7 @@ from typing import Any, Iterable, Iterator, Sequence
 import h5py
 import numpy as np
 import torch
+from src.wsi_pipeline.numpy_store import array_names, preferred_path, read_array, read_metadata
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Sampler
 
@@ -115,56 +116,70 @@ def inspect_coordinate_file(
     ``read_size`` and ``coordinate_window_size`` are expressed in pixels at
     ``read_level``. Canonical TRIDENT coordinates use level 0.
     """
-    with h5py.File(path, "r") as handle:
-        ds = _first_coordinate_dataset(handle)
-        attrs: dict[str, Any] = dict(handle.attrs)
-        attrs.update(dict(ds.attrs))
+    selected_path = preferred_path(path)
+    if selected_path.suffix == ".npyd":
+        names = array_names(selected_path)
+        name = next((key for key in ("coords", "coordinates", "patches/coords") if key in names), None)
+        if name is None:
+            name = next((key for key in names if read_array(selected_path, key, mmap=True).ndim == 2 and
+                         read_array(selected_path, key, mmap=True).shape[1] >= 2), None)
+        if name is None:
+            raise ValueError(f"No [N, >=2] coordinate dataset in {selected_path}")
+        ds_shape = read_array(selected_path, name, mmap=True).shape
+        attrs = read_metadata(selected_path)
+        attrs.update(attrs.get("_hdf5_object_attrs", {}).get(name, {}))
+    else:
+        with h5py.File(selected_path, "r") as handle:
+            ds = _first_coordinate_dataset(handle)
+            ds_shape = ds.shape
+            attrs = dict(handle.attrs)
+            attrs.update(dict(ds.attrs))
 
-        requested_patch_size = _attr_int(
+    requested_patch_size = _attr_int(
+        attrs,
+        ("patch_size", "patch_size_px", "tile_size", "read_size"),
+        default_patch_size,
+    )
+    patch_size_level0 = _attr_int(attrs, ("patch_size_level0",), -1)
+    target_mag = _attr_int(attrs, ("target_magnification", "mag"), -1)
+    level0_mag = _attr_int(attrs, ("level0_magnification",), -1)
+
+    # TRIDENT coordinates are always level-0 x/y. Native 40x slides need a
+    # larger level-0 crop than native 20x slides for the same 20x tile.
+    if patch_size_level0 > 0:
+        patch_level = 0
+        coordinate_window_size = patch_size_level0
+        scale = coordinate_window_size / max(requested_patch_size, 1)
+    else:
+        patch_level = _attr_int(
             attrs,
-            ("patch_size", "patch_size_px", "tile_size", "read_size"),
-            default_patch_size,
+            ("patch_level", "level", "read_level", "wsi_level"),
+            0,
         )
-        patch_size_level0 = _attr_int(attrs, ("patch_size_level0",), -1)
-        target_mag = _attr_int(attrs, ("target_magnification", "mag"), -1)
-        level0_mag = _attr_int(attrs, ("level0_magnification",), -1)
-
-        # TRIDENT coordinates are always level-0 x/y. Native 40x slides need a
-        # larger level-0 crop than native 20x slides for the same 20x tile.
-        if patch_size_level0 > 0:
-            patch_level = 0
-            coordinate_window_size = patch_size_level0
-            scale = coordinate_window_size / max(requested_patch_size, 1)
+        if target_mag > 0 and level0_mag > 0 and patch_level == 0:
+            scale = level0_mag / target_mag
+            coordinate_window_size = int(round(requested_patch_size * scale))
         else:
-            patch_level = _attr_int(
-                attrs,
-                ("patch_level", "level", "read_level", "wsi_level"),
-                0,
+            scale = 1.0
+            coordinate_window_size = requested_patch_size
+
+    read_size = coordinate_window_size
+    if crop_size_at_target_mag is not None:
+        if crop_size_at_target_mag <= 0:
+            raise ValueError("crop_size_at_target_mag must be positive")
+        if patch_level != 0:
+            raise ValueError(
+                f"Encoder-specific crops require level-0 TRIDENT coordinates: {path}"
             )
-            if target_mag > 0 and level0_mag > 0 and patch_level == 0:
-                scale = level0_mag / target_mag
-                coordinate_window_size = int(round(requested_patch_size * scale))
-            else:
-                scale = 1.0
-                coordinate_window_size = requested_patch_size
+        read_size = int(round(crop_size_at_target_mag * scale))
+        if read_size > coordinate_window_size:
+            raise ValueError(
+                f"Requested {crop_size_at_target_mag}px target-mag crop "
+                f"({read_size}px level 0) exceeds coordinate window "
+                f"({coordinate_window_size}px) in {path}"
+            )
 
-        read_size = coordinate_window_size
-        if crop_size_at_target_mag is not None:
-            if crop_size_at_target_mag <= 0:
-                raise ValueError("crop_size_at_target_mag must be positive")
-            if patch_level != 0:
-                raise ValueError(
-                    f"Encoder-specific crops require level-0 TRIDENT coordinates: {path}"
-                )
-            read_size = int(round(crop_size_at_target_mag * scale))
-            if read_size > coordinate_window_size:
-                raise ValueError(
-                    f"Requested {crop_size_at_target_mag}px target-mag crop "
-                    f"({read_size}px level 0) exceeds coordinate window "
-                    f"({coordinate_window_size}px) in {path}"
-                )
-
-        return int(ds.shape[0]), patch_level, read_size, coordinate_window_size
+    return int(ds_shape[0]), patch_level, read_size, coordinate_window_size
 
 
 def load_wsi_manifest(
@@ -387,9 +402,15 @@ class WSITileDataset(Dataset):
             coords = self._coord_cache.pop(key)
             self._coord_cache[key] = coords
             return coords
-        with h5py.File(path, "r") as handle:
-            ds = _first_coordinate_dataset(handle)
-            coords = np.asarray(ds[:, :2], dtype=np.int64)
+        selected_path = preferred_path(path)
+        if selected_path.suffix == ".npyd":
+            name = next((name for name in ("coords", "coordinates", "patches/coords")
+                         if name in array_names(selected_path)), "coords")
+            coords = np.asarray(read_array(selected_path, name)[:, :2], dtype=np.int64)
+        else:
+            with h5py.File(selected_path, "r") as handle:
+                ds = _first_coordinate_dataset(handle)
+                coords = np.asarray(ds[:, :2], dtype=np.int64)
         self._coord_cache[key] = coords
         while len(self._coord_cache) > self.coordinate_cache_size:
             self._coord_cache.popitem(last=False)
