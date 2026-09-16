@@ -14,19 +14,19 @@ description = "Select the Tile-EAF source layer on CONCH v1.5."
 
 [experiments.tile_source_ablation_conch15.variants.src00]
 source_layer = 0
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.tile_source_ablation_conch15.variants.src01]
 source_layer = 1
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.tile_source_ablation_conch15.variants.src02]
 source_layer = 2
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.tile_source_ablation_conch15.variants.src03]
 source_layer = 3
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.tile_keep_ablation_conch15]
 family = "tile_eaf"
@@ -39,11 +39,11 @@ blockers = ["Set the selected prune_layer after tile_source_ablation_conch15 is 
 
 [experiments.tile_keep_ablation_conch15.variants.keep10]
 keep_ratio = 0.10
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.tile_keep_ablation_conch15.variants.keep20]
 keep_ratio = 0.20
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.wsi_source_ablation_conch15_titan]
 family = "wsi_eaf"
@@ -101,7 +101,7 @@ description = "Final THUNDER evaluation of the frozen CONCH v1.5 configuration."
 blockers = ["Freeze the final tile source layer and keep ratio."]
 
 [experiments.tile_eval_thunder_conch15.variants.final]
-model_name = "conch_v15"
+model_name = "titan"
 
 [experiments.wsi_eval_eagle_conch15_titan]
 family = "wsi_eaf"
