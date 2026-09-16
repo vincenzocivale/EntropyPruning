@@ -28,6 +28,8 @@ from src.data.thunder_loaders import build_thunder_loaders, discover_thunder_dat
 from src.models import AttentionForecaster, ThunderBackboneAdapter
 from src.models.online_tile_eaf import PrunedLoRAEncoder, unwrap_checkpoint_state
 from src.utils import set_seed
+from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run
+from src.wsi_pipeline.experiment_results import publish_run_summary
 
 
 def _autocast(device: torch.device, dtype: str):
@@ -160,6 +162,7 @@ def fit_and_score(X_train, y_train, X_val, y_val, X_test, y_test, c_grid):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_experiment_arguments(parser)
     parser.add_argument("--base-data-folder", required=True)
     parser.add_argument("--dataset", action="append", help="Repeatable; omit to evaluate every installed THUNDER dataset")
     parser.add_argument("--pruned-checkpoint", type=Path, required=True)
@@ -170,8 +173,13 @@ def main() -> int:
     parser.add_argument("--amp-dtype", choices=("bf16", "fp16"), default="bf16")
     parser.add_argument("--c-grid", type=float, nargs="+", default=[0.01, 0.1, 1.0, 10.0])
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", type=Path, default=Path("results/tile_thunder.csv"))
+    parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
+
+    experiment_run = prepare_experiment_run(args, family="tile_eaf", stage="evaluation")
+    output_path = experiment_run.result_dir / "results.csv"
+    if args.output is not None and args.output.expanduser().resolve() != output_path.resolve():
+        raise ValueError(f"--output must equal canonical path: {output_path}")
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -222,13 +230,14 @@ def main() -> int:
                 }
             )
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
-    with args.output.open("w", newline="", encoding="utf-8") as handle:
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    print(f"wrote {len(rows)} rows -> {args.output}")
+    print(f"wrote {len(rows)} rows -> {output_path}")
+    publish_run_summary(run=experiment_run, args=args, summary={"output_csv": str(output_path), "result_rows": len(rows)})
     return 0
 
 

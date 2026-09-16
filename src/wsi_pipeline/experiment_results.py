@@ -1,69 +1,78 @@
-"""Uniform small metadata records for newly completed EAF runs."""
-
+"""Canonical result records for registry-declared EAF experiments."""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-from pathlib import Path
 from typing import Any
 
+from .experiment_registry import ExperimentRun
 
-def result_root() -> Path | None:
-    """Return the canonical results root when configured."""
-    root = os.environ.get("EAF_WSI_ROOT")
-    return Path(root).expanduser().resolve() / "results" if root else None
+PROVENANCE_INPUT_KEYS = (
+    "manifest",
+    "wsi_manifest",
+    "target_cache_index",
+    "tile_cache_dir",
+    "tile_input_root",
+    "source_wsi_root",
+    "teacher_wsi_root",
+    "labels_root",
+    "base_data_folder",
+)
+PROVENANCE_CHECKPOINT_KEYS = (
+    "teacher_checkpoint",
+    "forecaster_ckpt",
+    "forecaster_checkpoint",
+    "pruned_checkpoint",
+    "resume",
+)
 
 
-def publish_run_summary(
-    *, family: str, stage: str, run_name: str, args: Any, summary: dict[str, Any],
-) -> Path | None:
-    """Mirror lightweight run metadata under results; leave checkpoints in place."""
+def publish_run_summary(*, run: ExperimentRun, args: Any, summary: dict[str, Any]):
     config = vars(args).copy() if hasattr(args, "__dict__") else dict(args)
-    root = result_root()
-    if root is None and config.get("data_root"):
-        root = Path(config["data_root"]).expanduser().resolve() / "results"
-    if root is None:
-        return None
-    try:
-        repo_root = Path(__file__).resolve().parents[2]
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            check=True, timeout=5, cwd=repo_root,
-        ).stdout.strip()
-        code_dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=normal"],
-            capture_output=True, text=True, check=True, timeout=5, cwd=repo_root,
-        ).stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        revision = None
-        code_dirty = None
-    history = summary.get("history")
-    latest_epoch = history[-1] if isinstance(history, list) and history else {}
-    timings = summary.get("profile") or summary.get("timings")
-    if timings is None:
-        timings = {key: value for key, value in latest_epoch.items() if key in ("train", "val")}
-        timings = timings or {key: summary[key] for key in ("train_metrics", "val_metrics") if key in summary}
+    payload = dict(summary)
+    history = payload.pop("history", None)
+    artifacts: dict[str, str] = {}
+
+    if isinstance(history, list):
+        history_path = run.result_dir / "history.json"
+        tmp = history_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(history, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        tmp.replace(history_path)
+        artifacts["history"] = str(history_path)
+
+    for key in ("checkpoint", "output_csv", "profile_json"):
+        value = payload.get(key) or config.get(key)
+        if value:
+            artifacts[key] = str(value)
+
     record = {
-        "schema": "eaf.experiment_result.v1", "family": family, "stage": stage,
-        "run_name": run_name, "model": summary.get("tile_encoder") or config.get("model_name"),
-        "model_revision": summary.get("model_revision") or config.get("model_revision"),
-        "dataset": config.get("dataset") or config.get("manifest") or config.get("wsi_manifest") or config.get("tile_eaf_root"),
-        "split": {key: config.get(key) for key in ("split_seed", "val_fraction", "val_seed")},
-        "input_cache": {key: str(config[key]) for key in ("target_cache_index", "tile_eaf_root", "wsi_eaf_root") if config.get(key)},
-        "early_layer": summary.get("prune_layer") if stage == "distillation" else config.get("source_layer") if config.get("source_layer") is not None else config.get("titan_hidden_layer"),
-        "keep_ratio": config.get("keep_ratio"), "seed": config.get("seed"),
-        "code_revision": revision, "code_dirty": code_dirty,
-        "checkpoint": summary.get("checkpoint"),
-        "metrics": {key: value for key, value in summary.items() if key.startswith(("best_", "final_val_")) and isinstance(value, (int, float, dict))},
-        "artifacts": {key: str(summary[key]) for key in ("output_csv",) if summary.get(key)},
-        "timings": timings,
-        "epochs_completed": summary.get("epochs_completed"),
+        "schema": "eaf.experiment_result.v2",
+        "experiment_id": run.experiment_id,
+        "variant_id": run.variant_id,
+        "run_key": run.run_key,
+        "run_name": run.run_name,
+        "family": run.family,
+        "stage": run.stage,
+        "seed": run.seed,
+        "dataset_id": run.dataset_id,
+        "tile_encoder": run.tile_encoder,
+        "wsi_encoder": run.wsi_encoder,
+        "registry_sha256": run.registry_sha256,
+        "inputs": {
+            key: str(config[key])
+            for key in PROVENANCE_INPUT_KEYS
+            if config.get(key) not in (None, "")
+        },
+        "input_checkpoints": {
+            key: ([str(item) for item in config[key]] if isinstance(config[key], (list, tuple)) else str(config[key]))
+            for key in PROVENANCE_CHECKPOINT_KEYS
+            if config.get(key) not in (None, "", [])
+        },
+        "artifacts": artifacts,
+        "summary": payload,
         "config": config,
     }
-    path = root / family / stage / run_name / "summary.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    path = run.result_dir / "summary.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    tmp.replace(path)
     return path

@@ -40,6 +40,7 @@ from src.data.wsi.wsi_forecaster_dataset import (
 from src.models.wsi.dense_forecaster import WSIDenseForecaster, WSIDenseForecasterALiBi
 from src.utils import default_checkpoint_root, set_seed, wsi_encoder_pair_dir_name
 from src.wsi_pipeline.experiment_results import publish_run_summary
+from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run
 
 
 def _spearman(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -184,6 +185,7 @@ def _run_epoch(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_experiment_arguments(parser)
     parser.add_argument("--tile-input-root", type=Path, required=True, help="Tile embeddings used by the WSI student; final runs use the distilled Tile-EAF-pruned encoder cache")
     parser.add_argument("--source-wsi-root", type=Path, required=True, help="WSI cache built from --tile-input-root; intermediate hidden states are read here")
     parser.add_argument("--teacher-wsi-root", type=Path, required=True, help="Frozen full WSI teacher cache built from the unpruned tile encoder; attention targets are read here")
@@ -335,20 +337,9 @@ def main() -> int:
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Run/checkpoint naming mirrors scripts/training/train_tile_eaf.py: one
-    # subdirectory per run under $EAF_WSI_ROOT/checkpoints/wsi_eaf/<pair>/, named
-    # deterministically from the source layer (or "srcfinal" for the original
-    # context-free tile_embeddings input) and the tile-input variant.
-    pair = wsi_encoder_pair_dir_name(args.tile_encoder, args.wsi_encoder)
-    layer_tag = f"src{args.titan_hidden_layer:02d}" if args.input_source == "titan_hidden" else "srcfinal"
-    variant_tag = "" if args.tile_input_variant == "base" else f"__{args.tile_input_variant}"
-    run_name = args.run_name or f"{pair}_{layer_tag}{variant_tag}"
-    output_dir = (
-        Path(args.output_dir).expanduser().resolve()
-        if args.output_dir
-        else (default_checkpoint_root("wsi_eaf") / pair / run_name).resolve()
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    experiment_run = prepare_experiment_run(args, family="wsi_eaf", stage="forecaster")
+    run_name = experiment_run.run_name
+    output_dir = experiment_run.checkpoint_dir
 
     manifest_config = WSIForecasterManifestConfig(
         tile_input_root=args.tile_input_root,
@@ -430,8 +421,8 @@ def main() -> int:
     best_val_rho = float("-inf")
     global_step = 0
     epochs_without_improvement = 0
-    latest_ckpt_path = output_dir / f"latest_{run_name}.pt"
-    best_ckpt_path = output_dir / f"best_{run_name}.pt"
+    latest_ckpt_path = output_dir / "latest.pt"
+    best_ckpt_path = output_dir / "best.pt"
     if args.resume and latest_ckpt_path.exists():
         payload = torch.load(latest_ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(payload["model"])
@@ -559,8 +550,7 @@ def main() -> int:
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
     }
-    (output_dir / f"summary_{run_name}.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    publish_run_summary(family="wsi_eaf", stage="forecaster", run_name=run_name, args=args, summary=summary)
+    publish_run_summary(run=experiment_run, args=args, summary=summary)
     if use_wandb:
         wandb.finish()
     return 0

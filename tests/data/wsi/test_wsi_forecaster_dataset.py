@@ -50,7 +50,8 @@ def _make_dataset(tmp_path: Path, *, hidden_layer: int | None, suffix: str = ".h
                 "case_id": slide_id,
                 "project": "test",
                 "tile_path": str(wsi_eaf_path),  # unused in hidden_layer mode
-                "attention_path": str(wsi_eaf_path),
+                "source_wsi_path": str(wsi_eaf_path),
+                "teacher_wsi_path": str(wsi_eaf_path),
                 "split": "train",
             }
         ]
@@ -59,8 +60,8 @@ def _make_dataset(tmp_path: Path, *, hidden_layer: int | None, suffix: str = ".h
     build_attention_manifest_csv(manifest, attention_manifest_path)
 
     config = WSIForecasterManifestConfig(
-        tile_eaf_root=tmp_path,
-        wsi_eaf_root=tmp_path,
+        tile_input_root=tmp_path,
+        teacher_wsi_root=tmp_path,
         hidden_layer=hidden_layer,
     )
     return WSIForecasterDataset(manifest, attention_manifest_path=attention_manifest_path, config=config, split="train")

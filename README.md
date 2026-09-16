@@ -65,7 +65,7 @@ scripts/evaluation/evaluate_tile_thunder.py
 scripts/evaluation/evaluate_wsi_eagle.py
 ```
 
-Read `docs/pipeline.md` for the exact cache contracts and launch order.
+Read `docs/pipeline.md` for the exact cache contracts and launch order, and `docs/experiments.md` for experiment naming, storage and provenance.
 
 ## Scope
 

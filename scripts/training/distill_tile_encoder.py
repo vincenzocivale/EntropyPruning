@@ -31,6 +31,7 @@ from src.wsi_pipeline.cache_index import read_tile_cache_index
 from src.wsi_pipeline.cache_io import validate_cache
 from src.wsi_pipeline.compact_cache_dataset import build_compact_cache_tile_loaders
 from src.wsi_pipeline.experiment_results import publish_run_summary
+from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run
 
 
 def _autocast(device: torch.device, amp_dtype: str):
@@ -128,6 +129,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Task-agnostic online distillation of a forecaster-pruned tile encoder"
     )
+    add_experiment_arguments(parser)
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--data-root", required=True)
@@ -382,24 +384,10 @@ def main() -> None:
         f"({'compact_cache' if cached_targets else 'online_teacher_forward'} targets)"
     )
 
-    # <tile-encoder>_src<NN>_pruned<keep%>pct -- same base naming convention as
-    # train_tile_eaf.py (prune_layer plays the role of source_layer
-    # here), plus the keep-ratio that distinguishes the 30/20/10% variants.
-    run_name = args.run_name or (
-        f"{tile_encoder_dir_name(args.model_name)}_src{args.prune_layer:02d}"
-        f"_pruned{int(round(args.keep_ratio * 100))}pct"
-    )
-    output_dir = (
-        Path(args.output_dir).expanduser().resolve()
-        if args.output_dir
-        # One subdirectory per run under
-        # $EAF_WSI_ROOT/checkpoints/pruned_finetuned/<tile-encoder>/ so sweeping
-        # --keep-ratio never scatters same-encoder runs into same-directory files
-        # distinguished only by filename suffix.
-        else (default_checkpoint_root("pruned_finetuned") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / f"best_{run_name}_adapter.pt"
+    experiment_run = prepare_experiment_run(args, family="tile_eaf", stage="distillation")
+    run_name = experiment_run.run_name
+    output_dir = experiment_run.checkpoint_dir
+    checkpoint_path = output_dir / "best.pt"
     use_wandb = args.wandb_mode != "disabled"
     if use_wandb:
         wandb.init(
@@ -534,10 +522,7 @@ def main() -> None:
         "trainable_parameters": trainable_count,
         "storage_policy": "best LoRA adapter + JSON only; single shared backbone; no tile cache",
     }
-    (output_dir / f"summary_{run_name}.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
-    publish_run_summary(family="tile_eaf", stage="distillation", run_name=run_name, args=args, summary=summary)
+    publish_run_summary(run=experiment_run, args=args, summary=summary)
     if use_wandb:
         wandb.summary["best_val_loss"] = best_val
         wandb.summary["checkpoint"] = str(checkpoint_path)

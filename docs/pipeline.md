@@ -1,5 +1,18 @@
 # EAF paper pipeline
 
+## Experiment declaration comes first
+
+Every paper run must be declared in `configs/experiments/registry.toml` before launch.
+All training/evaluation entry points require `--experiment-id` and `--variant-id`.
+Scientific outputs are stored by `experiment_id / variant_id / seed`; timestamps and
+random IDs are not run names.
+
+See `docs/experiments.md` for storage/provenance rules.
+
+The canonical unlabeled corpus is `histai_core_v1`, which excludes `HISTAI-mixed` and
+`HISTAI-skin-b2` by construction.
+
+
 ## Invariants
 
 1. **No downstream labels in EAF training.** Tile-EAF, WSI-EAF and both embedding

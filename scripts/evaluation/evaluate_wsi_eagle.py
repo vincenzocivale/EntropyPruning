@@ -55,6 +55,8 @@ from src.models.wsi.pruned_titan import PrunedLoRATitanEncoder  # noqa: E402
 from src.utils import set_seed  # noqa: E402
 from src.wsi_pipeline.io import read_wsi_output_record  # noqa: E402
 from src.wsi_pipeline.wsi_models.titan import TitanAdapter  # noqa: E402
+from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run  # noqa: E402
+from src.wsi_pipeline.experiment_results import publish_run_summary  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -286,6 +288,7 @@ def evaluate_linear_probe(X: np.ndarray, y_labels: np.ndarray, groups: np.ndarra
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_experiment_arguments(parser)
     parser.add_argument("--data-root", type=Path, default=None, help="Canonical $EAF_WSI_ROOT; defaults to the env var")
     parser.add_argument(
         "--labels-root", type=Path, default=None,
@@ -319,6 +322,7 @@ def main() -> int:
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="disabled")
     args = parser.parse_args()
 
+    experiment_run = prepare_experiment_run(args, family="wsi_eaf", stage="evaluation")
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     layout = StoreLayout.from_root(args.data_root)
@@ -399,8 +403,10 @@ def main() -> int:
 
                 wandb.log({f"{task.cohort}/{task.task}/{model_name}/{k}": v for k, v in row.items() if isinstance(v, (int, float))})
 
-    run_name = str(int(time.time()))
-    output_csv = args.output_csv or (layout.results / "wsi_eaf" / "evaluation" / run_name / "results.csv")
+    run_name = experiment_run.run_name
+    output_csv = experiment_run.result_dir / "results.csv"
+    if args.output_csv is not None and args.output_csv.expanduser().resolve() != output_csv.resolve():
+        raise ValueError(f"--output-csv must equal canonical path: {output_csv}")
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in results for key in row})
     with open(output_csv, "w", newline="", encoding="utf-8") as handle:
@@ -408,9 +414,9 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(results)
     print(f"wrote {len(results)} rows to {output_csv}")
-    from src.wsi_pipeline.experiment_results import publish_run_summary
     publish_run_summary(
-        family="wsi_eaf", stage="evaluation", run_name=run_name, args=args,
+        run=experiment_run,
+        args=args,
         summary={"output_csv": str(output_csv), "result_rows": len(results)},
     )
 

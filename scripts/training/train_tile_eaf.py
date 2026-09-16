@@ -29,6 +29,7 @@ from src.models import AttentionForecaster, ThunderBackboneAdapter
 from src.models.online_tile_eaf import OnlineAttentionTeacher, load_checkpoint_flexibly
 from src.training.tile_eaf_profile import build_tile_eaf_profile
 from src.wsi_pipeline.experiment_results import publish_run_summary
+from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run
 from src.utils import default_checkpoint_root, set_seed, tile_encoder_dir_name
 
 
@@ -315,6 +316,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Task-agnostic tile EAF training from WSI tiles sampled on the fly"
     )
+    add_experiment_arguments(parser)
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--data-root", required=True)
@@ -582,19 +584,9 @@ def main() -> None:
         "cuda", enabled=args.amp_dtype == "fp16"
     )
 
-    # Run names are just <tile-encoder>_src<NN> -- every other hyperparameter
-    # (target layer, tiles-per-wsi, lr, cache mode, ...) is still fully captured
-    # in wandb.config below, it just no longer bloats the display name.
-    run_name = args.run_name or f"{tile_encoder_dir_name(args.model_name)}_src{args.source_layer:02d}"
-    output_dir = (
-        Path(args.output_dir).expanduser().resolve()
-        if args.output_dir
-        # One subdirectory per run under $EAF_WSI_ROOT/checkpoints/tile_eaf/
-        # <tile-encoder>/ so sweeping --source-layer never scatters same-encoder
-        # runs into same-directory files distinguished only by filename suffix.
-        else (default_checkpoint_root("tile_eaf") / tile_encoder_dir_name(args.model_name) / run_name).resolve()
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    experiment_run = prepare_experiment_run(args, family="tile_eaf", stage="forecaster")
+    run_name = experiment_run.run_name
+    output_dir = experiment_run.checkpoint_dir
 
     # Resume state (overridden below if --resume is given). A fresh run
     # starts at epoch 0 with nothing to skip.
@@ -675,8 +667,8 @@ def main() -> None:
         )
     wandb_run_id = wandb.run.id if use_wandb else None
 
-    checkpoint_path = output_dir / f"best_{run_name}.pt"
-    resume_checkpoint_path = output_dir / f"latest_{run_name}.pt"
+    checkpoint_path = output_dir / "best.pt"
+    resume_checkpoint_path = output_dir / "latest.pt"
 
     def _save_resume_checkpoint(
         *, resume_epoch: int, resume_skip_batches: int, step: int
@@ -844,10 +836,7 @@ def main() -> None:
             else "best checkpoint + JSON only; no tile/embedding/attention cache"
         ),
     }
-    (output_dir / f"summary_{run_name}.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
-    publish_run_summary(family="tile_eaf", stage="forecaster", run_name=run_name, args=args, summary=summary)
+    publish_run_summary(run=experiment_run, args=args, summary=summary)
     if args.profile_json:
         profile_path = Path(args.profile_json).expanduser().resolve()
         profile_path.parent.mkdir(parents=True, exist_ok=True)
