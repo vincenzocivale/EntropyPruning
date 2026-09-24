@@ -2,8 +2,8 @@
 
 This repository now contains one paper-driven pipeline only: train EAF without
 downstream labels on HISTAI, distill pruned tile/WSI encoders to reproduce their
-unpruned embeddings, and evaluate frozen representations on THUNDER and the public
-WSI tasks used by EAGLE.
+unpruned embeddings, and evaluate frozen representations on THUNDER and public
+TCGA/CPTAC/Patho-Bench downstream WSI tasks.
 
 ## Scientific pipeline
 
@@ -62,10 +62,15 @@ Evaluation:
 
 ```text
 scripts/evaluation/evaluate_tile_thunder.py
-scripts/evaluation/evaluate_wsi_eagle.py
+scripts/evaluation/evaluate_wsi_downstream.py
 ```
 
 Read `docs/pipeline.md` for the exact cache contracts and launch order, and `docs/experiments.md` for experiment naming, storage and provenance.
+
+External spatial-transcriptomics evaluation of immune/stromal niche preservation
+is documented in [docs/spatial_biology.md](docs/spatial_biology.md). It compares
+frozen full/EAF embeddings, other foundation models and imported ST predictions;
+it never adds spatial data to EAF training.
 
 ## Scope
 

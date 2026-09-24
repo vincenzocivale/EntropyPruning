@@ -37,6 +37,8 @@ import torch.nn as nn
 from peft import LoraConfig
 from peft.tuners.lora import LoraModel
 
+from src.models.wsi.dense_forecaster import WSIDenseForecasterALiBi
+
 
 def _find_block_list(vision_encoder: nn.Module) -> nn.ModuleList:
     """Locate the 6 real ViT blocks generically (same heuristic already proven in
@@ -54,6 +56,36 @@ def _find_block_list(vision_encoder: nn.Module) -> nn.ModuleList:
     return candidates[0][1]
 
 
+def _titan_token_order(
+    raw_titan: nn.Module,
+    features: torch.Tensor,
+    xy: torch.Tensor,
+    patch_size_level0: int,
+) -> torch.Tensor:
+    """Map TITAN's internal (x-major scatter grid) token order back to input rows.
+
+    Returns ``order`` such that ``xy[order]``/``features[order]`` are in the same
+    order as the tokens TITAN's transformer blocks actually see -- required
+    because ``WSIDenseForecasterALiBi`` needs coords aligned with the patch
+    tokens it scores, and those are not generally in input-cache order (see
+    ``PrunedLoRATitanEncoder.encode_with_selection``, which this mirrors).
+    """
+    if xy.ndim != 2 or xy.shape != (len(features), 2) or (features == 0).all(dim=1).any():
+        raise ValueError("Token-order mapping requires Nx2 coords and nonzero tile features")
+    grid = torch.div(xy - xy.min(dim=0).values, patch_size_level0, rounding_mode="floor")
+    if torch.unique(grid, dim=0).shape[0] != len(xy):
+        raise ValueError("Multiple input tiles occupy the same TITAN grid cell")
+    preprocess = raw_titan.vision_encoder.forward.__func__.__globals__.get("preprocess_features")
+    if preprocess is None:
+        raise RuntimeError("Cannot verify input/token mapping for this TITAN implementation")
+    _, grid_coords, mask = preprocess(features.new_ones((len(features), 1)), xy, patch_size_level0)
+    token_coords = grid_coords[0].permute(1, 2, 0)[mask[0]].detach().cpu().tolist()
+    lookup = {tuple(point): i for i, point in enumerate(xy.detach().cpu().tolist())}
+    if len(token_coords) != len(xy) or any(tuple(point) not in lookup for point in token_coords):
+        raise RuntimeError("TITAN preprocessing changed spatial coordinates")
+    return torch.tensor([lookup[tuple(point)] for point in token_coords], device=xy.device)
+
+
 def _gather_pairwise(bias: torch.Tensor, full_index: torch.Tensor) -> torch.Tensor:
     """bias: [B,H,S,S] -> [B,H,K,K], keeping only rows/cols in full_index ([B,K])."""
     batch, heads, _seq_q, seq_k = bias.shape
@@ -69,13 +101,21 @@ def _make_pruned_blocks_forward(
     *,
     prune_layer: int,
     forecaster: nn.Module,
+    forecaster_needs_coords: bool,
+    token_coords: torch.Tensor | None,
     keep_ratio: float,
     num_prefix_tokens: int,
+    selection_callback=None,
 ):
     """Build a drop-in replacement for ``CustomSequential.forward`` that prunes the
     token sequence (and re-slices the ALiBi bias to match) right after
     ``modules_list[prune_layer]`` runs, then continues with the remaining blocks
-    on the pruned sequence only."""
+    on the pruned sequence only.
+
+    ``token_coords`` (precomputed by ``_titan_token_order``, already in TITAN's
+    internal token order) is required when ``forecaster_needs_coords`` -- an
+    ALiBi forecaster's spatial bias is meaningless without coords aligned to
+    the patch tokens it actually scores."""
 
     def pruned_forward(x: torch.Tensor, attn_mask: torch.Tensor | None, bg_mask=None):
         for module in modules_list[: prune_layer + 1]:
@@ -86,8 +126,19 @@ def _make_pruned_blocks_forward(
         batch, n_patches, dim = patches.shape
         keep = max(1, int(round(n_patches * keep_ratio)))
         with torch.no_grad():
-            scores = forecaster(patches)  # [B, n_patches], frozen forecaster, no grad
+            if forecaster_needs_coords:
+                if token_coords is None or len(token_coords) != n_patches:
+                    raise RuntimeError(
+                        "ALiBi forecaster requires token_coords aligned to the patch "
+                        f"tokens (got {None if token_coords is None else len(token_coords)}, "
+                        f"expected {n_patches})"
+                    )
+                scores = forecaster(patches, token_coords.unsqueeze(0).expand(batch, -1, -1))
+            else:
+                scores = forecaster(patches)  # [B, n_patches], frozen forecaster, no grad
             indices = scores.topk(keep, dim=-1).indices  # [B, keep]
+        if selection_callback is not None:
+            selection_callback(indices.detach().clone(), n_patches)
         gather_index = indices.unsqueeze(-1).expand(-1, -1, dim)
         kept_patches = torch.gather(patches, dim=1, index=gather_index)
         x = torch.cat((prefix, kept_patches), dim=1)
@@ -155,6 +206,7 @@ class PrunedLoRATitanEncoder(nn.Module):
         self.forecaster.eval()
         for parameter in self.forecaster.parameters():
             parameter.requires_grad_(False)
+        self.forecaster_needs_coords = isinstance(forecaster, WSIDenseForecasterALiBi)
 
     @property
     def raw_titan(self) -> nn.Module:
@@ -169,16 +221,27 @@ class PrunedLoRATitanEncoder(nn.Module):
         return self
 
     @contextmanager
-    def _pruning_context(self) -> Iterator[None]:
+    def _pruning_context(
+        self, tile_embeddings: torch.Tensor, coords: torch.Tensor, selection_callback=None
+    ) -> Iterator[None]:
         block_list = _find_block_list(self.raw_titan.vision_encoder)
         blocks_module = self.raw_titan.vision_encoder.blocks
+        token_coords = None
+        if self.forecaster_needs_coords:
+            features = tile_embeddings.squeeze(0) if tile_embeddings.ndim == 3 else tile_embeddings
+            xy = coords.squeeze(0) if coords.ndim == 3 else coords
+            order = _titan_token_order(self.raw_titan, features, xy, self.patch_size_level0)
+            token_coords = xy[order]
         original_forward = blocks_module.forward
         blocks_module.forward = _make_pruned_blocks_forward(
             block_list,
             prune_layer=self.prune_layer,
             forecaster=self.forecaster,
+            forecaster_needs_coords=self.forecaster_needs_coords,
+            token_coords=token_coords,
             keep_ratio=self.keep_ratio,
             num_prefix_tokens=self.num_prefix_tokens,
+            selection_callback=selection_callback,
         )
         try:
             yield
@@ -192,13 +255,40 @@ class PrunedLoRATitanEncoder(nn.Module):
         Returns the pruned+LoRA slide embedding, [768] (post ``vision_encoder.proj``,
         same convention as ``TitanAdapter``/the cached ``slide_embedding``).
         """
-        with self._pruning_context():
+        with self._pruning_context(tile_embeddings, coords):
             embedding = self.raw_titan.encode_slide_from_patch_features(
                 tile_embeddings, coords, self.patch_size_level0
             )
         while embedding.dim() > 1 and embedding.shape[0] == 1:
             embedding = embedding.squeeze(0)
         return embedding
+
+    @torch.inference_mode()
+    def encode_with_selection(self, tile_embeddings: torch.Tensor, coords: torch.Tensor):
+        """Return embedding and actual retained input-row indices for spatial audit.
+
+        The regular forward and checkpoint format are unchanged. Evaluation only;
+        never infer retained tiles by separately recomputing forecaster scores.
+        """
+        if self.training:
+            raise RuntimeError("Selection export requires model.eval()")
+        # TITAN scatters into an x-major grid before its transformer. Token order
+        # is NOT generally the input cache order.
+        features = tile_embeddings.squeeze(0) if tile_embeddings.ndim == 3 else tile_embeddings
+        xy = coords.squeeze(0) if coords.ndim == 3 else coords
+        order = _titan_token_order(self.raw_titan, features, xy, self.patch_size_level0)
+        selections = []
+        def record(indices, n_patches):
+            if n_patches != len(order):
+                raise RuntimeError("TITAN token count differs from verified input mapping")
+            selections.append(indices)
+        with self._pruning_context(tile_embeddings, coords, record):
+            embedding = self.raw_titan.encode_slide_from_patch_features(
+                tile_embeddings, coords, self.patch_size_level0
+            )
+        if len(selections) != 1 or selections[0].shape[0] != 1:
+            raise RuntimeError("Expected exactly one single-slide pruning event")
+        return embedding.reshape(-1), order[selections[0][0]]
 
     def trainable_state_dict(self) -> dict[str, torch.Tensor]:
         """Return only LoRA tensors -- never the full frozen TITAN checkpoint."""

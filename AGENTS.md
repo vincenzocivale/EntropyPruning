@@ -4,7 +4,10 @@
 
 This repository supports one experimental chain only:
 
-`HISTAI -> Tile-EAF -> tile embedding distillation -> WSI-EAF -> WSI embedding distillation -> THUNDER/EAGLE evaluation`.
+`HISTAI -> Tile-EAF -> tile embedding distillation -> WSI-EAF -> WSI embedding distillation -> THUNDER/TCGA-CPTAC evaluation`.
+
+The registered HEST immune/stromal niche experiment is an additional external
+evaluation of this same frozen chain, never an EAF pretraining extension.
 
 Do not reintroduce supervised THUNDER pretraining, TCGA/HEST/GTEx EAF pretraining,
 morphology coarsening, signal-discovery branches, or competing pruning baselines.
@@ -24,7 +27,8 @@ morphology coarsening, signal-discovery branches, or competing pruning baselines
 Reusable logic belongs under `src/`; `scripts/` contains thin entry points.
 Supported training entry points are `train_tile_eaf.py`, `distill_tile_encoder.py`,
 `train_wsi_eaf.py`, and `distill_wsi_titan.py`. Supported evaluation entry points
-are `evaluate_tile_thunder.py` and `evaluate_wsi_eagle.py`.
+are `evaluate_tile_thunder.py`, `evaluate_wsi_downstream.py`, and
+`evaluate_spatial_biology.py` (external evaluation only; see `docs/spatial_biology.md`).
 
 Runtime artifacts never belong in git. Use `$EAF_WSI_ROOT` for datasets, caches,
 checkpoints, results and logs.
@@ -48,4 +52,3 @@ Reusable full teacher caches stay dataset/model-centric. Student/pruned-derived 
 belong under `caches/experiments/<experiment>/<variant>/seed_<seed>/`.
 
 See `docs/experiments.md`.
-

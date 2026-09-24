@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("h5py")
 
-from scripts.evaluation.evaluate_wsi_eagle import _cv_splits, _paired_indices, collect_embeddings, discover_tasks
+from scripts.evaluation.evaluate_wsi_downstream import _cv_splits, _paired_indices, collect_embeddings, discover_tasks
 
 
 def test_complementary_single_class_cohorts_form_one_combined_task(tmp_path):

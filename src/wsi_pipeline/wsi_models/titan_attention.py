@@ -194,10 +194,17 @@ class _RuntimeAttentionCapture:
         batch, _heads, query_tokens, key_tokens = canonical.shape
         if batch != 1:
             raise RuntimeError(f"TITAN attention capture currently requires batch=1, got {batch}")
-        # TITAN also uses attentional pooling after its ViT blocks.  Its
-        # cross-attention has a small query sequence and the same tile keys;
-        # it is not a self-attention matrix and cannot be mixed with the ViT
-        # layers captured below.
+        # TITAN also uses attentional pooling after its ViT blocks (attn_pool,
+        # attn_pool_contrastive). Its cross-attention has a small query sequence
+        # and the same tile keys, so it is not a self-attention matrix and
+        # cannot be mixed with the ViT layers captured below. The query/key
+        # token-count check below is the primary filter, but for slides whose
+        # tile count happens to equal the pooling module's query count, Q==K
+        # by coincidence and the shape check alone doesn't catch it -- exclude
+        # pooling modules by name too, since they never belong in the per-layer
+        # self-attention stack regardless of their shape for a given slide.
+        if "pool" in self._module_name().lower():
+            return
         if query_tokens != key_tokens:
             return
         global_index = self.config.global_token_index

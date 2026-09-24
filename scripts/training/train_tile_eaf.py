@@ -9,6 +9,7 @@ import math
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -239,6 +240,53 @@ def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
     tmp_path.replace(path)
 
 
+def _to_cpu_clone(value: Any) -> Any:
+    """Recursively detach+clone tensors to CPU so a background thread can
+    serialize them to disk without racing the training thread's in-place
+    updates (optimizer step, autograd) on the live GPU tensors."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu", copy=True)
+    if isinstance(value, dict):
+        return {key: _to_cpu_clone(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        cloned = [_to_cpu_clone(item) for item in value]
+        return type(value)(cloned) if isinstance(value, tuple) else cloned
+    return value
+
+
+class _AsyncCheckpointWriter:
+    """Serializes checkpoint writes onto a single background thread.
+
+    The (fast) GPU->CPU tensor copy still happens synchronously on the
+    training thread -- avoiding a race with the next optimizer step -- but
+    the (slow, disk-I/O-bound) `torch.save` + atomic rename is handed off,
+    so a mid-epoch checkpoint no longer stalls the training loop while the
+    shared filesystem is busy.
+    """
+
+    def __init__(self) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._pending: Any = None
+
+    def save(self, payload: dict[str, Any], path: Path) -> None:
+        cpu_payload = _to_cpu_clone(payload)
+        if self._pending is not None:
+            # Bound the queue to one in-flight write: block briefly here only
+            # if the previous save (e.g. from the last checkpoint interval)
+            # hasn't finished yet, rather than piling up writes.
+            self._pending.result()
+        self._pending = self._executor.submit(_atomic_torch_save, cpu_payload, path)
+
+    def flush(self) -> None:
+        if self._pending is not None:
+            self._pending.result()
+            self._pending = None
+
+    def close(self) -> None:
+        self.flush()
+        self._executor.shutdown(wait=True)
+
+
 def _rng_state_payload() -> dict[str, Any]:
     return {
         "python": random.getstate(),
@@ -376,10 +424,10 @@ def main() -> None:
     # 16/20, not 8/4: see the --slide-cache-size note in
     # distill_tile_encoder.py -- same burst-then-stall fix.
     parser.add_argument("--num-workers", type=int, default=16)
-    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--prefetch-factor", type=int, default=4)
     parser.add_argument("--slide-cache-size", type=int, default=20)
     parser.add_argument(
-        "--openslide-cache-mib", type=int, default=256,
+        "--openslide-cache-mib", type=int, default=512,
         help="Decoded OpenSlide tile-cache capacity per DataLoader worker (0 uses the library default)",
     )
 
@@ -669,9 +717,10 @@ def main() -> None:
 
     checkpoint_path = output_dir / "best.pt"
     resume_checkpoint_path = output_dir / "latest.pt"
+    async_checkpoint_writer = _AsyncCheckpointWriter()
 
     def _save_resume_checkpoint(
-        *, resume_epoch: int, resume_skip_batches: int, step: int
+        *, resume_epoch: int, resume_skip_batches: int, step: int, async_write: bool = False
     ) -> None:
         payload = _resume_checkpoint_payload(
             # Always serialize the original module so --compile checkpoints keep
@@ -690,7 +739,10 @@ def main() -> None:
             history=history,
             wandb_run_id=wandb_run_id,
         )
-        _atomic_torch_save(payload, resume_checkpoint_path)
+        if async_write:
+            async_checkpoint_writer.save(payload, resume_checkpoint_path)
+        else:
+            _atomic_torch_save(payload, resume_checkpoint_path)
 
     for epoch in range(start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
@@ -703,6 +755,7 @@ def main() -> None:
                     resume_epoch=_epoch,
                     resume_skip_batches=batch_index + 1,
                     step=step,
+                    async_write=True,
                 )
 
         train_metrics, global_step = _run_epoch(
@@ -763,6 +816,10 @@ def main() -> None:
             _atomic_torch_save(_checkpoint_payload(forecaster, args, adapter), checkpoint_path)
         else:
             epochs_without_improvement += 1
+        # Wait for any in-flight mid-epoch async save before the synchronous
+        # epoch-boundary write below -- both target `resume_checkpoint_path`,
+        # so they must not race on the same tmp file.
+        async_checkpoint_writer.flush()
         # Clean epoch-boundary resume point, saved after best_val/
         # epochs_without_improvement are updated so a resume right after a
         # crash here doesn't redo this epoch's early-stopping bookkeeping.
@@ -823,6 +880,8 @@ def main() -> None:
         ):
             print(f"Early stopping at epoch {epoch + 1}")
             break
+
+    async_checkpoint_writer.close()
 
     summary = {
         "run_name": run_name,

@@ -1,0 +1,34 @@
+# Exploratory (non-frozen) tile-level-only protocol: full CONCH v1.5 vs EAF pruned.
+# Not the official protocol (no UNI comparator, no WSI-level slide embeddings yet).
+version = 1
+coordinate_system = "level0_xy"
+reference = "full"
+spots = "$EAF_WSI_ROOT/datasets/hest_biology_hest1k_breast_v1/spots.csv"
+expression = "$EAF_WSI_ROOT/datasets/hest_biology_hest1k_breast_v1/expression.npz"
+normalization = "counts"
+expression_layer = ""
+signatures = "$EAF_WSI_ROOT/datasets/hest_biology_hest1k_breast_v1/immune_stromal_programs_v1_ensembl.gmt"
+min_signature_coverage = 0.8
+pca_components = 256
+alphas = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+bootstrap = 2000
+max_plot_slides = 6
+
+split_policy = "patient_disjoint_hest_release_manifest_v1"
+spot_policy = "registered_h_and_e_st_centres_level0_only"
+primary_programs = ["immune_activation", "stromal_ecm"]
+primary_metrics = ["pearson", "spearman", "rmse", "edge_rmse", "moran_abs_error", "coverage"]
+
+[[methods]]
+name = "full"
+embeddings = "$EAF_WSI_ROOT/caches/spatial/hest_biology_hest1k_breast_v1/conch_v15/tile/full.npz"
+citation = "CONCH v1.5/TITAN: https://doi.org/10.1038/s41591-025-03982-3"
+supervision = "frozen foundation model; downstream patient-balanced ridge only"
+pretraining_overlap = "must be audited against HEST sample IDs before interpretation"
+
+[[methods]]
+name = "eaf"
+embeddings = "$EAF_WSI_ROOT/caches/experiments/hest_biological_conch15_titan/final/seed_42/spatial/tile/eaf.npz"
+citation = "EAF; checkpoint and registry provenance recorded by exporter"
+supervision = "HISTAI-only EAF and distillation; downstream patient-balanced ridge only"
+pretraining_overlap = "HISTAI training corpus disjoint from HEST patients (audited 2026-09-20, see registry.toml)"

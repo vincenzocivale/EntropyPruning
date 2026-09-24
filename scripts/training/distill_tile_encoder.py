@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import torch
+import numpy as np
 from tqdm.auto import tqdm
 import wandb
 
@@ -38,6 +40,13 @@ def _autocast(device: torch.device, amp_dtype: str):
     enabled = device.type == "cuda"
     dtype = torch.bfloat16 if amp_dtype == "bf16" else torch.float16
     return torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled)
+
+
+def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
+    """Avoid exposing a half-written resume checkpoint after interruption."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
 
 
 def _run_epoch(
@@ -229,6 +238,24 @@ def main() -> None:
     parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Checkpoint from a prior interrupted run. Full latest.pt checkpoints resume optimizer/scheduler/RNG exactly at an epoch boundary; adapter-only best.pt checkpoints warm-start weights only.",
+    )
+    parser.add_argument(
+        "--resume-epoch",
+        type=int,
+        default=None,
+        help="Completed epoch count for an adapter-only --resume checkpoint. Required when the checkpoint has no full trainer state.",
+    )
+    parser.add_argument(
+        "--resume-best-val",
+        type=float,
+        default=None,
+        help="Best validation loss associated with an adapter-only --resume checkpoint; prevents replacing it with a worse continuation.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -276,6 +303,16 @@ def main() -> None:
     if args.gradient_checkpointing and hasattr(student.raw_backbone, "set_grad_checkpointing"):
         student.raw_backbone.set_grad_checkpointing(True)
 
+    resume_payload = None
+    if args.resume is not None:
+        if not args.resume.is_file():
+            raise FileNotFoundError(f"Resume checkpoint does not exist: {args.resume}")
+        resume_payload = torch.load(args.resume, map_location="cpu", weights_only=False)
+        state = resume_payload.get("trainable_state_dict")
+        if not isinstance(state, dict):
+            raise ValueError("Resume checkpoint must contain trainable_state_dict")
+        student.load_trainable_state_dict(state)
+
     trainable = [parameter for parameter in student.parameters() if parameter.requires_grad]
     trainable_count = sum(parameter.numel() for parameter in trainable)
     total_count = sum(parameter.numel() for parameter in student.parameters())
@@ -283,6 +320,42 @@ def main() -> None:
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp_dtype == "fp16")
+    resume_mode = "fresh"
+    start_epoch = 0
+    best_val = math.inf
+    epochs_without_improvement = 0
+    history: list[dict[str, Any]] = []
+    global_step = 0
+    if resume_payload is not None:
+        exact_keys = {"optimizer_state_dict", "scheduler_state_dict", "scaler_state_dict", "epoch"}
+        if exact_keys <= set(resume_payload):
+            optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+            scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
+            scaler.load_state_dict(resume_payload["scaler_state_dict"])
+            start_epoch = int(resume_payload["epoch"])
+            best_val = float(resume_payload.get("best_val", math.inf))
+            epochs_without_improvement = int(resume_payload.get("epochs_without_improvement", 0))
+            history = list(resume_payload.get("history", []))
+            global_step = int(resume_payload.get("global_step", 0))
+            if "rng_state" in resume_payload:
+                torch.set_rng_state(resume_payload["rng_state"])
+            if torch.cuda.is_available() and "cuda_rng_state" in resume_payload:
+                torch.cuda.set_rng_state_all(resume_payload["cuda_rng_state"])
+            if "numpy_rng_state" in resume_payload:
+                np.random.set_state(resume_payload["numpy_rng_state"])
+            if "python_rng_state" in resume_payload:
+                random.setstate(resume_payload["python_rng_state"])
+            resume_mode = "exact_epoch_boundary"
+        else:
+            if args.resume_epoch is None:
+                raise ValueError("Adapter-only --resume requires --resume-epoch")
+            if args.resume_epoch < 0:
+                raise ValueError("--resume-epoch must be nonnegative")
+            start_epoch = args.resume_epoch
+            if args.resume_best_val is not None:
+                best_val = float(args.resume_best_val)
+            scheduler.step(start_epoch)
+            resume_mode = "weights_only_optimizer_reset"
 
     split_records = load_wsi_manifest(
         args.manifest,
@@ -416,11 +489,8 @@ def main() -> None:
             ],
         )
 
-    best_val = math.inf
-    epochs_without_improvement = 0
-    history: list[dict[str, Any]] = []
-    global_step = 0
-    for epoch in range(args.epochs):
+    latest_path = output_dir / "latest.pt"
+    for epoch in range(start_epoch, args.epochs):
         train_sampler.set_epoch(epoch)
         val_sampler.set_epoch(0)
         train_metrics, global_step = _run_epoch(
@@ -470,7 +540,7 @@ def main() -> None:
         if improved:
             best_val = val_metrics["loss"]
             epochs_without_improvement = 0
-            torch.save(
+            _atomic_torch_save(
                 {
                     "trainable_state_dict": student.trainable_state_dict(),
                     "config": vars(args),
@@ -483,6 +553,30 @@ def main() -> None:
             )
         else:
             epochs_without_improvement += 1
+
+        _atomic_torch_save(
+            {
+                "format": "tile_eaf_distillation_resume_v1",
+                "trainable_state_dict": student.trainable_state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "best_val": best_val,
+                "epochs_without_improvement": epochs_without_improvement,
+                "history": history,
+                "rng_state": torch.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "numpy_rng_state": np.random.get_state(),
+                "python_rng_state": random.getstate(),
+                "config": vars(args),
+                "base_model": args.model_name,
+                "forecaster_checkpoint": str(Path(args.forecaster_ckpt).resolve()),
+                "resume_mode": resume_mode,
+            },
+            latest_path,
+        )
 
         if use_wandb:
             log = {
@@ -513,13 +607,17 @@ def main() -> None:
             print(f"Early stopping at epoch {epoch + 1}")
             break
 
+    completed_epochs = max((int(row["epoch"]) for row in history), default=start_epoch)
     summary = {
         "run_name": run_name,
         "best_val_loss": best_val,
         "checkpoint": str(checkpoint_path),
-        "epochs_completed": len(history),
+        "latest_checkpoint": str(latest_path),
+        "epochs_completed": completed_epochs,
         "history": history,
         "trainable_parameters": trainable_count,
+        "resume_mode": resume_mode,
+        "resumed_from": str(args.resume) if args.resume is not None else None,
         "storage_policy": "best LoRA adapter + JSON only; single shared backbone; no tile cache",
     }
     publish_run_summary(run=experiment_run, args=args, summary=summary)

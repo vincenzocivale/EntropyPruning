@@ -30,7 +30,7 @@ a candidate task, but a task is only evaluated once matching embeddings are
 actually found for at least `--min-slides` slides on both sides (label +
 embedding) -- so this script runs correctly today against a mostly-empty
 downstream tree (reports 0 usable tasks) and picks up more cohorts
-automatically as EAGLE/Patho-Bench downloads complete, with no code change.
+automatically as TCGA/CPTAC/Patho-Bench downloads complete, with no code change.
 """
 
 from __future__ import annotations
@@ -50,13 +50,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.wsi_pipeline.numpy_store import preferred_path, read_array  # noqa: E402
 from src.data.wsi.layout import StoreLayout  # noqa: E402
-from src.models.wsi.dense_forecaster import WSIDenseForecaster, WSIDenseForecasterALiBi  # noqa: E402
-from src.models.wsi.pruned_titan import PrunedLoRATitanEncoder  # noqa: E402
 from src.utils import set_seed  # noqa: E402
 from src.wsi_pipeline.io import read_wsi_output_record  # noqa: E402
-from src.wsi_pipeline.wsi_models.titan import TitanAdapter  # noqa: E402
 from src.wsi_pipeline.experiment_registry import add_experiment_arguments, prepare_experiment_run  # noqa: E402
 from src.wsi_pipeline.experiment_results import publish_run_summary  # noqa: E402
+from src.evaluation.checkpoints import _load_pruned_titan, _load_wsi_forecaster  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -112,54 +110,6 @@ def _read_labels(path: Path) -> dict[str, str]:
             if row["slide_id"] and row["label"] not in (None, ""):
                 labels[row["slide_id"]] = row["label"]
     return labels
-
-
-def _load_wsi_forecaster(checkpoint_path: Path, *, device: torch.device):
-    """Mirrors distill_wsi_titan.py::_load_forecaster exactly (kept as an
-    independent copy since scripts/ is not an importable package)."""
-    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    fargs = payload["args"]
-    common = dict(embed_dim=768, hidden=fargs["hidden"], n_heads=fargs["n_heads"], n_layers=fargs["n_layers"], dropout=0.0)
-    if fargs.get("architecture") == "dense_alibi":
-        forecaster = WSIDenseForecasterALiBi(**common)
-    else:
-        forecaster = WSIDenseForecaster(**common)
-    forecaster.load_state_dict(payload["model"])
-    forecaster = forecaster.to(device).eval()
-    source_layer = fargs.get("titan_hidden_layer")
-    if source_layer is None:
-        raise ValueError(f"{checkpoint_path} was not trained with --input-source titan_hidden")
-    return forecaster, int(source_layer)
-
-
-def _load_pruned_titan(
-    pruned_checkpoint: Path, *, device: torch.device, hf_token: str | None
-) -> tuple[PrunedLoRATitanEncoder, dict]:
-    payload = torch.load(pruned_checkpoint, map_location="cpu", weights_only=False)
-    config = payload.get("args", {})
-    forecaster_ckpt = config.get("forecaster_checkpoint")
-    if not forecaster_ckpt:
-        raise ValueError(f"{pruned_checkpoint} does not record a forecaster_checkpoint")
-    forecaster, prune_layer = _load_wsi_forecaster(Path(forecaster_ckpt), device=device)
-    titan_model = TitanAdapter(token=hf_token).model
-    student = PrunedLoRATitanEncoder(
-        titan_model,
-        forecaster,
-        prune_layer=int(config.get("prune_layer", prune_layer)),
-        keep_ratio=float(config["keep_ratio"]),
-        patch_size_level0=int(config.get("patch_size_level0", 512)),
-        lora_r=int(config.get("lora_r", 8)),
-        lora_alpha=int(config.get("lora_alpha", 32)),
-        lora_dropout=float(config.get("lora_dropout", 0.05)),
-    ).to(device)
-    student.load_trainable_state_dict(payload["model"])
-    student.eval()
-    meta = {
-        "run_name": payload.get("run_name", pruned_checkpoint.parent.name),
-        "prune_layer": student.prune_layer,
-        "keep_ratio": student.keep_ratio,
-    }
-    return student, meta
 
 
 def _baseline_embedding(cohort_dir: Path, slide_id: str) -> np.ndarray | None:
@@ -333,7 +283,7 @@ def main() -> int:
         tasks = [task for task in tasks if task.task in args.task]
     print(f"discovered {len(tasks)} labeled task(s) under {labels_root}")
     if not tasks:
-        print("nothing to evaluate -- no <cohort>/labels/*.csv found yet (expected while EAGLE downloads are in progress)")
+        print("nothing to evaluate -- no <cohort>/labels/*.csv found yet (expected while TCGA/CPTAC downloads are in progress)")
         return 0
 
     if args.pruned_checkpoint and args.tile_input_root is None:

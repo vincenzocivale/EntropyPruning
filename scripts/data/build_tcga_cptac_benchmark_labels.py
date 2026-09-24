@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""Fetch TCGA labels for the EAGLE benchmark replication (Phase D) from the
+"""Fetch TCGA labels for the TCGA/CPTAC WSI downstream benchmark (Phase D) from the
 public cBioPortal REST API (no auth) and write them in the
 <labels-root>/<cohort>/labels/<task>.csv format (slide_id,label) that
-scripts/evaluation/evaluate_wsi_eagle.py's discover_tasks() expects.
+scripts/evaluation/evaluate_wsi_downstream.py's discover_tasks() expects.
 
 Scope: core metadata via API; the benchmark workflow is in docs/pipeline.md -- clinical/
 mutation attributes exposed as structured cBioPortal fields only. Tasks whose
 labels only exist in a paper's supplementary tables (STAD EBV/Lauren) are out
 of scope here; BRCA hormone-receptor status (ESR1/PGR/ERBB2) is also out of
 scope for the TCGA arm (not present in the PanCanAtlas 2018 clinical fields --
-in the EAGLE paper these are CPTAC-arm tasks; get them from the already-
+these are CPTAC-arm tasks; get them from the already-
 downloaded Patho-Bench splits instead, see the CPTAC labels script).
 
 Joins on patient barcode (first 12 chars of a slide_id), against every audited
@@ -25,11 +25,11 @@ import requests
 
 API = "https://www.cbioportal.org/api"
 EAF_WSI_ROOT = Path("/data2/home/vcivale/projects/imaging/data/WSI")
-TCGA_MANIFESTS = EAF_WSI_ROOT / "datasets/downstream/wsi_level/eagle_tcga_v1/manifests"
-# evaluate_wsi_eagle.py's discover_tasks() scans
+TCGA_MANIFESTS = EAF_WSI_ROOT / "datasets/downstream/wsi_level/tcga_v1/manifests"
+# evaluate_wsi_downstream.py's discover_tasks() scans
 # <labels-root>/<cohort>/labels/*.csv directly under the default labels-root
 # (<data-root>/datasets/downstream/wsi_level) -- cohort dirs go straight
-# there, not nested under eagle_tcga_v1/.
+# there, not nested under tcga_v1/.
 LABELS_ROOT = EAF_WSI_ROOT / "datasets/downstream/wsi_level"
 
 GENES = {"BRAF": 673, "KRAS": 3845, "PIK3CA": 5290, "EGFR": 1956, "STK11": 6794, "TP53": 7157}

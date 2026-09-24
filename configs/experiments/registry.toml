@@ -45,19 +45,89 @@ model_name = "titan"
 keep_ratio = 0.20
 model_name = "titan"
 
+# Joint source-layer/compute-budget ablation.  This is separate from the
+# sequential historical keep-ratio sweep because source layer and keep ratio
+# can interact; its only selection data are the frozen HISTAI validation split.
+[experiments.tile_joint_source_keep_conch15]
+family = "tile_eaf"
+stage = "distillation"
+status = "ready"
+dataset_id = "histai_core_v1"
+tile_encoder = "conch_v15"
+description = "Joint Tile-EAF source-layer/compute-budget ablation on the frozen HISTAI split; HEST is external evaluation only."
+
+[experiments.tile_joint_source_keep_conch15.variants.src00_keep10]
+prune_layer = 0
+keep_ratio = 0.10
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src00/best_conch_v15_src00.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src00_keep15]
+prune_layer = 0
+keep_ratio = 0.15
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src00/best_conch_v15_src00.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src01_keep10]
+prune_layer = 1
+keep_ratio = 0.10
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/forecaster/tile_source_ablation_conch15/src01/seed_42/best.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src01_keep15]
+prune_layer = 1
+keep_ratio = 0.15
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/forecaster/tile_source_ablation_conch15/src01/seed_42/best.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src01_keep20]
+prune_layer = 1
+keep_ratio = 0.20
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/forecaster/tile_source_ablation_conch15/src01/seed_42/best.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src02_keep20]
+prune_layer = 2
+keep_ratio = 0.20
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src02/best_conch_v15_src02.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src02_keep10]
+prune_layer = 2
+keep_ratio = 0.10
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src02/best_conch_v15_src02.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src02_keep15]
+prune_layer = 2
+keep_ratio = 0.15
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src02/best_conch_v15_src02.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src03_keep15]
+prune_layer = 3
+keep_ratio = 0.15
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/forecaster/tile_source_ablation_conch15/src03/seed_42/best.pt"
+
+[experiments.tile_joint_source_keep_conch15.variants.src03_keep10]
+prune_layer = 3
+keep_ratio = 0.10
+model_name = "titan"
+forecaster_ckpt = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/forecaster/tile_source_ablation_conch15/src03/seed_42/best.pt"
+
 [experiments.wsi_source_ablation_conch15_titan]
 family = "wsi_eaf"
 stage = "forecaster"
-status = "blocked"
+status = "ready"
 dataset_id = "histai_core_v1"
 tile_encoder = "conch_v15"
 wsi_encoder = "titan"
 description = "Select the TITAN source layer using frozen pruned-CONCH inputs."
-blockers = [
-  "Freeze the optimal CONCH tile configuration.",
-  "Build the canonical pruned CONCH tile cache.",
-  "Build the TITAN source cache from that pruned tile cache."
-]
+tile_checkpoint = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/distillation/tile_joint_source_keep_conch15/src02_keep15/seed_42/best.pt"
+source_wsi_root = "/data2/home/vcivale/data/WSI/caches/wsi_eaf/histai_core_v1/conch_v15__titan_pruned_src02_keep15"
+teacher_wsi_root = "/data2/home/vcivale/data/WSI/caches/wsi_eaf/histai_core_v1/conch_v15__titan"
+blockers = []
 
 [experiments.wsi_source_ablation_conch15_titan.variants.src00]
 titan_hidden_layer = 0
@@ -91,38 +161,111 @@ keep_ratio = 0.10
 [experiments.wsi_keep_ablation_conch15_titan.variants.keep20]
 keep_ratio = 0.20
 
+[experiments.wsi_joint_source_keep_conch15_titan]
+family = "wsi_eaf"
+stage = "distillation"
+status = "ready"
+dataset_id = "histai_core_v1"
+tile_encoder = "conch_v15"
+wsi_encoder = "titan"
+description = "Joint TITAN source-layer x keep-ratio sweep, before freezing a single prune_layer (mirrors tile_joint_source_keep_conch15)."
+blockers = []
+
+[experiments.wsi_joint_source_keep_conch15_titan.variants.src00_keep15]
+titan_hidden_layer = 0
+keep_ratio = 0.15
+
+[experiments.wsi_joint_source_keep_conch15_titan.variants.src00_keep10]
+titan_hidden_layer = 0
+keep_ratio = 0.10
+
+[experiments.wsi_joint_source_keep_conch15_titan.variants.src01_keep15]
+titan_hidden_layer = 1
+keep_ratio = 0.15
+
+[experiments.wsi_joint_source_keep_conch15_titan.variants.src01_keep10]
+titan_hidden_layer = 1
+keep_ratio = 0.10
+
 [experiments.tile_eval_thunder_conch15]
 family = "tile_eaf"
 stage = "evaluation"
-status = "blocked"
+status = "ready"
 dataset_id = "thunder"
 tile_encoder = "conch_v15"
-description = "Final THUNDER evaluation of the frozen CONCH v1.5 configuration."
-blockers = ["Freeze the final tile source layer and keep ratio."]
+description = "Final THUNDER evaluation of the frozen CONCH v1.5 configuration: source_layer=2, keep_ratio=0.15 (tile_joint_source_keep_conch15/src02_keep15)."
 
 [experiments.tile_eval_thunder_conch15.variants.final]
 model_name = "titan"
 
-[experiments.wsi_eval_eagle_conch15_titan]
+[experiments.tile_eval_thunder_conch15.variants.src02_keep20]
+model_name = "titan"
+
+[experiments.tile_eval_thunder_conch15.variants.src02_keep10]
+model_name = "titan"
+
+[experiments.tile_eval_thunder_conch15.variants.src01_keep20]
+model_name = "titan"
+
+[experiments.wsi_eval_downstream_conch15_titan]
 family = "wsi_eaf"
 stage = "evaluation"
 status = "blocked"
-dataset_id = "eagle_compatible"
+dataset_id = "tcga_cptac_pathobench"
 tile_encoder = "conch_v15"
 wsi_encoder = "titan"
-description = "Final TCGA/CPTAC/Patho-Bench-compatible WSI evaluation."
+description = "Final TCGA/CPTAC/Patho-Bench WSI evaluation."
 blockers = ["Freeze the final TITAN configuration and prepare downstream caches."]
 
-[experiments.wsi_eval_eagle_conch15_titan.variants.final]
+[experiments.wsi_eval_downstream_conch15_titan.variants.final]
+
+[experiments.wsi_eval_downstream_conch15_titan_pilot]
+family = "wsi_eaf"
+stage = "evaluation"
+status = "ready"
+dataset_id = "tcga_v1"
+tile_encoder = "conch_v15"
+wsi_encoder = "titan"
+description = "Preliminary TCGA-only downstream evaluation of one wsi_joint_source_keep_conch15_titan sweep candidate (source_layer=0, keep_ratio=0.15). Not the final frozen TITAN config; the source-layer sweep (src00-src03) is still in progress. Not a substitute for wsi_eval_downstream_conch15_titan/final."
+blockers = []
+
+[experiments.wsi_eval_downstream_conch15_titan_pilot.variants.src00_keep15]
 
 [experiments.hest_biological_conch15_titan]
 family = "wsi_eaf"
 stage = "evaluation"
-status = "blocked"
-dataset_id = "hest"
+status = "ready"
+dataset_id = "hest_biology_hest1k_breast_v1"
 tile_encoder = "conch_v15"
 wsi_encoder = "titan"
-description = "Biological HEST evaluation distinct from pure classification."
-blockers = ["Freeze the biological target/protocol and dataset split before launch."]
+description = "External HEST immune/stromal program, spatial fidelity and niche-coverage evaluation; frozen full/EAF and imported literature comparators."
+protocol = "configs/evaluation/spatial_biology_hest_breast_v1.toml"
+protocol_sha256 = "1775c3ba85dea7ba86964cd7c3ce94667b9902e41e215f25e5c9567b0ce010a3"
+tile_checkpoint = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/distillation/tile_joint_source_keep_conch15/src02_keep15/seed_42/best.pt"
+tile_checkpoint_sha256 = "f5144983030a28a94dc3638ad3d6096c3a97a80a7c24eaf7a2504c534065b13b"
+tile_forecaster_checkpoint = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/conch_v15/conch_v15_src02/best_conch_v15_src02.pt"
+tile_forecaster_checkpoint_sha256 = "93acc07fc2e39d53ead3524c458f96159e9d13c6f33d5307c78d1d982a1db84a"
+patient_disjointness_audit = "2026-09-20: HISTAI training corpus (source=histai/HISTAI-{colorectal,gastrointestinal,hematologic,mixed,skin,thorax}, case_id namespace case_NNNNN) has no breast subset and shares no repo/ID scheme with HEST breast eval (source=MahmoodLab/hest release HEST_v1_3_0, patient_id BCxxxxx, slide_id SPA51-80); disjointness holds by construction (distinct providers, no organ overlap)."
+blockers = [
+  "WSI-level export still blocked: no distilled WSI checkpoint exists yet under checkpoints/wsi_eaf/conch_v15__titan/.",
+  "Materialize UNI comparator embeddings before running the full evaluate_spatial_biology.py comparison (not required for the tile-encoder export/verification step)."
+]
 
 [experiments.hest_biological_conch15_titan.variants.final]
+
+[experiments.hest_biological_conch15_titan_tile_exploratory]
+family = "wsi_eaf"
+stage = "evaluation"
+status = "ready"
+dataset_id = "hest_biology_hest1k_breast_v1"
+tile_encoder = "conch_v15"
+wsi_encoder = "titan"
+description = "Preliminary tile-level-only readout (full CONCH v1.5 vs EAF src02_keep15): immune/stromal program fidelity. No UNI comparator, no WSI-level slide embeddings; not a substitute for hest_biological_conch15_titan/final."
+protocol = "configs/evaluation/spatial_biology_hest_breast_v1_tile_exploratory.toml"
+protocol_sha256 = "6110b397085535bf3f36114c1ec91f1e071edf3a08587eb418091e5e2b39deb9"
+tile_checkpoint = "/data2/home/vcivale/data/WSI/checkpoints/tile_eaf/distillation/tile_joint_source_keep_conch15/src02_keep15/seed_42/best.pt"
+tile_checkpoint_sha256 = "f5144983030a28a94dc3638ad3d6096c3a97a80a7c24eaf7a2504c534065b13b"
+patient_disjointness_audit = "2026-09-20: see hest_biological_conch15_titan entry; same HISTAI/HEST audit applies."
+blockers = []
+
+[experiments.hest_biological_conch15_titan_tile_exploratory.variants.final]

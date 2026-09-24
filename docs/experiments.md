@@ -41,6 +41,22 @@ $EAF_WSI_ROOT/
 
 Checkpoint filenames do not repeat the run name because the directory is unique.
 
+The same pattern applies to `wsi_eaf`, with two distinct stages that are easy to
+confuse:
+
+```text
+checkpoints/wsi_eaf/forecaster/<experiment_id>/<variant_id>/seed_<seed>/best.pt
+checkpoints/wsi_eaf/distillation/<experiment_id>/<variant_id>/seed_<seed>/best.pt
+```
+
+`forecaster/` holds the frozen WSI-EAF network that scores which TITAN tiles to
+keep (step 6, `train_wsi_eaf.py`) -- it is not itself a usable pruned FM.
+`distillation/` holds the LoRA weights that actually implement pruning inside
+TITAN's own forward pass (step 7, `distill_wsi_titan.py`), loaded together with
+its frozen forecaster via `PrunedLoRATitanEncoder`
+(`src/models/wsi/pruned_titan.py`). Evaluation and downstream use always target
+a `distillation/` checkpoint, never a `forecaster/` one directly.
+
 ## Registry workflow
 
 Before a paper run:
@@ -139,6 +155,10 @@ full config and canonical paths.
 
 `summary.json` records final metrics plus provenance of manifests, tile input cache,
 WSI source cache, WSI teacher cache, labels and input checkpoints.
+
+The external spatial biology evaluation additionally freezes `protocol_sha256`
+in its registry entry. Its per-spot predictions, signature audit, spatial metrics
+and report follow the contracts in [spatial_biology.md](spatial_biology.md).
 
 ## What not to save
 

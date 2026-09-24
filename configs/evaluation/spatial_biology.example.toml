@@ -1,0 +1,53 @@
+# Template only: freeze cohort, signatures, split and checkpoints before launch.
+version = 1
+coordinate_system = "level0_xy"
+reference = "full"
+spots = "$EAF_WSI_ROOT/datasets/hest_biology/spots.csv"
+expression = "$EAF_WSI_ROOT/datasets/hest_biology/expression.npz"
+normalization = "counts"
+signatures = "$EAF_WSI_ROOT/datasets/hest_biology/signatures.gmt"
+min_signature_coverage = 0.8
+pca_components = 256
+alphas = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+bootstrap = 2000
+max_plot_slides = 6
+
+[[methods]]
+name = "full"
+embeddings = "$EAF_WSI_ROOT/caches/spatial/hest/conch_v15/tile/full.npz"
+citation = "CONCH v1.5 / TITAN: https://doi.org/10.1038/s41591-025-03982-3"
+supervision = "frozen foundation model; downstream ridge only"
+pretraining_overlap = "unknown; audit source cohorts before publication"
+# Optional: add these to BOTH full and eaf when WSI checkpoints are ready.
+# slide_embeddings = "$EAF_WSI_ROOT/caches/spatial/hest/conch_v15_titan/wsi/full.npz"
+
+[[methods]]
+name = "eaf"
+embeddings = "$EAF_WSI_ROOT/caches/experiments/hest_biological_conch15_titan/final/seed_42/spatial/tile/eaf.npz"
+provenance = "$EAF_WSI_ROOT/caches/experiments/hest_biological_conch15_titan/final/seed_42/spatial/tile/provenance.json"
+citation = "EAF; record exact frozen checkpoint in export provenance"
+supervision = "HISTAI-only EAF and distillation; downstream ridge only"
+pretraining_overlap = "inherits teacher exposure; verify HISTAI/downstream patient disjointness"
+# slide_embeddings = "$EAF_WSI_ROOT/caches/experiments/hest_biological_conch15_titan/final/seed_42/spatial/wsi/eaf.npz"
+# selection = "$EAF_WSI_ROOT/caches/experiments/hest_biological_conch15_titan/final/seed_42/spatial/wsi/selection.csv"
+
+# Add frozen competitor features generated on exactly the same physical crops.
+# [[methods]]
+# name = "uni"
+# embeddings = "$EAF_WSI_ROOT/caches/hest/uni/spot_embeddings.npz"
+# citation = "UNI: https://doi.org/10.1038/s41591-024-02857-3"
+# supervision = "frozen foundation model; downstream ridge only"
+# pretraining_overlap = "unknown"
+
+# Alternatively evaluate test-only molecular predictions from a separately run
+# BLEEP/TRIPLEX experiment. See docs/spatial_biology.md for the normalization contract.
+# [[methods]]
+# name = "bleep"
+# predictions = "$EAF_WSI_ROOT/results/external/bleep/test_expression.npz"
+# citation = "https://github.com/bowang-lab/BLEEP; record commit/checkpoint"
+# supervision = "paired histology-expression training on declared training patients"
+# pretraining_overlap = "audited separately"
+# split_sha256 = "REPLACE_WITH_SHA256_OF_SPOTS_CSV"
+# test_expression_used = false
+# training_patients = ["cohort_patient_1", "cohort_patient_2"]
+# validation_patients = ["cohort_patient_3"]

@@ -24,7 +24,7 @@ The canonical unlabeled corpus is `histai_core_v1`, which excludes `HISTAI-mixed
 4. **WSI source and teacher caches are different objects.** `source_wsi_root` may
    contain hidden states produced from pruned tile embeddings; `teacher_wsi_root`
    contains attention/slide embeddings from the full pipeline.
-5. **THUNDER/EAGLE are evaluation only.** Only lightweight downstream heads may use
+5. **THUNDER/TCGA-CPTAC are evaluation only.** Only lightweight downstream heads may use
    their labels.
 
 ## 1. HISTAI preparation
@@ -75,6 +75,19 @@ python scripts/training/distill_tile_encoder.py \
 Student = EAF-pruned tile encoder with trainable LoRA in the remaining blocks.
 Target = embedding produced by the same unpruned tile encoder on the same image.
 
+The trainer writes `latest.pt` at every completed epoch. Resume it with the
+same registered experiment/variant and CLI configuration:
+
+```bash
+python scripts/training/distill_tile_encoder.py ... \
+  --resume "$EAF_WSI_ROOT/checkpoints/tile_eaf/distillation/<experiment>/<variant>/seed_42/latest.pt"
+```
+
+`latest.pt` restores the LoRA weights, optimizer, scheduler, scaler and RNG at
+an epoch boundary. A legacy adapter-only `best.pt` can only warm-start weights;
+declare its completed epoch and best validation value explicitly with
+`--resume-epoch` and `--resume-best-val`.
+
 Build the student tile-input cache:
 
 ```bash
@@ -97,8 +110,22 @@ Use `scripts/features/cache_wsi_teacher.py` twice.
 
 **Student-source cache**
 - input: `<tile_pruned_cache>`
-- save TITAN hidden state at the intended WSI pruning layer
+- save TITAN hidden state at the intended WSI pruning layer(s)
 - output: `<wsi_pruned_source_cache>`
+
+```bash
+python scripts/features/cache_wsi_teacher.py \
+  --tile-cache-dir <tile_pruned_cache> \
+  --output-dir <wsi_pruned_source_cache> \
+  --model titan \
+  --titan-hidden-layer 0 --titan-hidden-layer 1 --titan-hidden-layer 2 --titan-hidden-layer 3
+```
+
+`--titan-hidden-layer` is repeatable: TITAN's forward pass over tile embeddings
+runs once regardless, so capturing several candidate layers in the same pass costs
+almost nothing extra. Do this once up front for every layer you might want to
+ablate in step 6 (`--input-source titan_hidden --titan-hidden-layer <L>`) rather
+than re-running the cache build per layer.
 
 The second cache is a *source representation*, not the final teacher target.
 
@@ -141,10 +168,10 @@ python scripts/evaluation/evaluate_tile_thunder.py \
   --pruned-checkpoint <distilled_tile.pt>
 ```
 
-WSI level / public EAGLE-compatible tasks:
+WSI level / public TCGA/CPTAC downstream tasks:
 
 ```bash
-python scripts/evaluation/evaluate_wsi_eagle.py \
+python scripts/evaluation/evaluate_wsi_downstream.py \
   --teacher-wsi-root <benchmark_full_titan_cache> \
   --tile-input-root <benchmark_pruned_tile_cache> \
   --pruned-checkpoint <distilled_wsi.pt>
