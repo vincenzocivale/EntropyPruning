@@ -1,15 +1,26 @@
 #!/usr/bin/env python
-"""Linear-probing evaluation of WSI-FM slide embeddings on labeled downstream
-datasets from the configured downstream benchmark bank (see docs/pipeline.md).
+"""Downstream evaluation of WSI-FM slide embeddings on labeled datasets from
+the configured downstream benchmark bank (see docs/pipeline.md).
 
 Compares the frozen baseline WSI-FM (TITAN) against one or more WSI-EAF
 Stage-2 checkpoints (`scripts/training/distill_wsi_titan.py`,
-`checkpoints/wsi_eaf_pruned/<pair>/<run>/`) by training a plain linear head
-(logistic regression, k-fold cross-validated) on each model's slide
-embeddings for each labeled task. No backbone/forecaster weights are updated
-here -- linear probing only, mirroring the tile-EAF Stage-3 evaluation
-(`scripts/training/train_multi_thunder_classifier.py --adaptation linear_probing`) one
-level up.
+`checkpoints/wsi_eaf_pruned/<pair>/<run>/`) by training a downstream head on
+each model's slide embeddings for each labeled task. No backbone/forecaster
+weights are updated here -- probing only, mirroring the tile-EAF Stage-3
+evaluation (`scripts/training/train_multi_thunder_classifier.py --adaptation
+linear_probing`) one level up. Three protocols, chosen by which of
+--train-cohort/--test-cohort/--classifier are given:
+
+- Default (neither flag): within-cohort `StratifiedGroupKFold` linear probe,
+  `evaluate_linear_probe`. Not comparable to EAGLE's reported AUROCs -- no
+  external-cohort generalization test.
+- `--train-cohort`/`--test-cohort`, `--classifier logreg` (default once these
+  are set): single LogisticRegression fit on the pooled train cohorts,
+  evaluated once on the pooled test cohorts, `evaluate_train_test`.
+- `--train-cohort`/`--test-cohort`, `--classifier mlp`: EAGLE's actual
+  main-benchmark (Fig. 1-5) protocol -- 5-fold-ensemble MLP head,
+  `evaluate_fig2_protocol` -- see docs/pipeline.md "Evaluation only" for the
+  full recipe and an example command.
 
 Two embedding sources per task:
 
@@ -194,6 +205,200 @@ def _cv_splits(X: np.ndarray, y: np.ndarray, groups: np.ndarray, *, folds: int, 
     return usable_folds, list(splitter.split(X, y, groups))
 
 
+# TCGA (build_tcga_cptac_benchmark_labels.py) and CPTAC/Patho-Bench
+# (build_cptac_pathobench_labels.py) name the same biomarker task differently.
+# Canonicalize both to one key so a train cohort's task can be matched against
+# a same-biomarker task in a disjoint test cohort. Values are the ad hoc,
+# lowercased names actually observed on disk for each source.
+_TASK_ALIASES: dict[str, str] = {
+    "pik3ca_mutation": "pik3ca_mutation",
+    "kras_mutation": "kras_mutation",
+    "braf_mutation": "braf_mutation",
+    "egfr_mutation": "egfr_mutation",
+    "stk11_mutation": "stk11_mutation",
+    "tp53_mutation": "tp53_mutation",
+    "msi_status": "msi_status", "msi_h": "msi_status",
+}
+
+
+def canonical_task_name(name: str) -> str:
+    return _TASK_ALIASES.get(name.lower(), name.lower())
+
+
+def evaluate_train_test(
+    X_train: np.ndarray, y_train_labels: np.ndarray, X_test: np.ndarray, y_test_labels: np.ndarray,
+) -> dict:
+    """Fit once on `train`, evaluate once on disjoint `test` -- no CV, no shared
+    patients possible since train/test come from different cohorts. Mirrors
+    EAGLE's train-on-TCGA/test-on-external-cohort protocol, unlike
+    `evaluate_linear_probe`'s within-cohort k-fold."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+    from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+    encoder = LabelEncoder()
+    encoder.fit(np.concatenate([y_train_labels, y_test_labels]))
+    y_train, y_test = encoder.transform(y_train_labels), encoder.transform(y_test_labels)
+    n_classes = len(encoder.classes_)
+    if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
+        return {"status": "skipped", "reason": "train or test split lacks one class"}
+
+    scaler = StandardScaler().fit(X_train)
+    X_train_s, X_test_s = scaler.transform(X_train), scaler.transform(X_test)
+    clf = LogisticRegression(max_iter=2000, class_weight="balanced")
+    clf.fit(X_train_s, y_train)
+    preds = clf.predict(X_test_s)
+    result = {
+        "status": "ok",
+        "n_train_slides": int(X_train.shape[0]),
+        "n_test_slides": int(X_test.shape[0]),
+        "n_classes": n_classes,
+        "accuracy": float(accuracy_score(y_test, preds)),
+        "f1_macro": float(f1_score(y_test, preds, average="macro")),
+    }
+    if n_classes == 2:
+        proba = clf.predict_proba(X_test_s)[:, 1]
+        result["auroc"] = float(roc_auc_score(y_test, proba))
+    return result
+
+
+class _MLPHead(torch.nn.Module):
+    """The classification head EAGLE trains on every slide encoder's embedding
+    for its main 31-task benchmark (Methods, "Once a slide-level or patient-
+    level embedding was computed, it was fed into a small multilayer
+    perceptron..."): hidden=256, SiLU, dropout, binary/multi-class logits."""
+
+    def __init__(self, in_dim: int, n_classes: int, *, hidden: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden),
+            torch.nn.SiLU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(hidden, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def train_mlp_head(
+    X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray,
+    *, n_classes: int, device: torch.device, epochs: int = 32, lr: float = 1e-4, weight_decay: float = 1e-2,
+    seed: int = 42,
+) -> _MLPHead:
+    """AdamW + one-cycle LR, class-weighted cross-entropy, early stopping on
+    validation loss -- mirrors EAGLE's Methods recipe for the main-benchmark
+    MLP classifier (768-in-dim in the paper was CONCH/CTransPath-specific;
+    here `in_dim` is inferred from whatever embedding is being evaluated)."""
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    torch.manual_seed(seed)
+    class_counts = np.bincount(y_train, minlength=n_classes).astype(np.float32)
+    class_weight = torch.tensor(class_counts.sum() / np.maximum(class_counts, 1), dtype=torch.float32, device=device)
+    class_weight = class_weight / class_weight.mean()
+
+    model = _MLPHead(X_train.shape[1], n_classes).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    steps_per_epoch = max(1, (len(X_train) + 63) // 64)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weight)
+
+    X_train_t = torch.from_numpy(X_train).float().to(device)
+    y_train_t = torch.from_numpy(y_train).long().to(device)
+    X_val_t = torch.from_numpy(X_val).float().to(device)
+    y_val_t = torch.from_numpy(y_val).long().to(device)
+
+    best_val_loss = float("inf")
+    best_state = None
+    for _epoch in range(epochs):
+        model.train()
+        perm = torch.randperm(len(X_train_t), generator=generator)
+        for start in range(0, len(perm), 64):
+            idx = perm[start : start + 64]
+            optimizer.zero_grad()
+            loss = loss_fn(model(X_train_t[idx]), y_train_t[idx])
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(X_val_t), y_val_t).item()
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    return model
+
+
+def mlp_predict_proba(model: _MLPHead, X: np.ndarray, *, device: torch.device) -> np.ndarray:
+    with torch.no_grad():
+        logits = model(torch.from_numpy(X).float().to(device))
+        return torch.softmax(logits, dim=-1).cpu().numpy()
+
+
+def evaluate_fig2_protocol(
+    X_train_pool: np.ndarray, y_train_labels: np.ndarray, groups_train: np.ndarray,
+    X_test: np.ndarray, y_test_labels: np.ndarray,
+    *, device: torch.device, folds: int = 5, seed: int = 42,
+) -> dict:
+    """EAGLE's main-benchmark (Fig. 1-5) protocol: 5-fold split of the train
+    pool (80% train / 20% validation per fold, grouped by patient), one MLP
+    trained per fold; each of the 5 fold-models scores the (disjoint,
+    never-trained-on) external test set once; per-slide test probabilities
+    are averaged across the 5 fold-models (ensemble) before computing metrics
+    -- not 5 separate AUROCs averaged, one AUROC of the averaged scores."""
+    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+    from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+    encoder = LabelEncoder()
+    encoder.fit(np.concatenate([y_train_labels, y_test_labels]))
+    y_train_pool = encoder.transform(y_train_labels)
+    y_test = encoder.transform(y_test_labels)
+    n_classes = len(encoder.classes_)
+    if len(np.unique(y_train_pool)) < 2 or len(np.unique(y_test)) < 2:
+        return {"status": "skipped", "reason": "train pool or test split lacks one class"}
+
+    usable_folds, splits = _cv_splits(X_train_pool, y_train_pool, groups_train, folds=folds, seed=seed)
+    if usable_folds < 2:
+        return {"status": "skipped", "reason": "smallest class in train pool has fewer than 2 patient groups"}
+
+    test_proba_sum = np.zeros((X_test.shape[0], n_classes), dtype=np.float64)
+    n_fold_models = 0
+    for train_idx, val_idx in splits:
+        if len(np.unique(y_train_pool[train_idx])) < 2 or len(np.unique(y_train_pool[val_idx])) < 2:
+            continue
+        scaler = StandardScaler().fit(X_train_pool[train_idx])
+        X_tr = scaler.transform(X_train_pool[train_idx])
+        X_val = scaler.transform(X_train_pool[val_idx])
+        X_te = scaler.transform(X_test)
+        model = train_mlp_head(
+            X_tr, y_train_pool[train_idx], X_val, y_train_pool[val_idx], n_classes=n_classes, device=device, seed=seed
+        )
+        test_proba_sum += mlp_predict_proba(model, X_te, device=device)
+        n_fold_models += 1
+
+    if n_fold_models < 2:
+        return {"status": "skipped", "reason": "fewer than 2 usable fold-models trained"}
+
+    test_proba = test_proba_sum / n_fold_models
+    preds = test_proba.argmax(axis=-1)
+    result = {
+        "status": "ok",
+        "n_train_slides": int(X_train_pool.shape[0]),
+        "n_test_slides": int(X_test.shape[0]),
+        "n_classes": n_classes,
+        "n_fold_models": n_fold_models,
+        "accuracy": float(accuracy_score(y_test, preds)),
+        "f1_macro": float(f1_score(y_test, preds, average="macro")),
+    }
+    if n_classes == 2:
+        result["auroc"] = float(roc_auc_score(y_test, test_proba[:, 1]))
+    return result
+
+
 def evaluate_linear_probe(X: np.ndarray, y_labels: np.ndarray, groups: np.ndarray, *, folds: int, seed: int) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -236,6 +441,183 @@ def evaluate_linear_probe(X: np.ndarray, y_labels: np.ndarray, groups: np.ndarra
     return result
 
 
+def _write_results(results: list[dict], experiment_run, args) -> Path:
+    output_csv = experiment_run.result_dir / "results.csv"
+    if args.output_csv is not None and args.output_csv.expanduser().resolve() != output_csv.resolve():
+        raise ValueError(f"--output-csv must equal canonical path: {output_csv}")
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in results for key in row})
+    with open(output_csv, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    print(f"wrote {len(results)} rows to {output_csv}")
+    publish_run_summary(
+        run=experiment_run, args=args,
+        summary={"output_csv": str(output_csv), "result_rows": len(results)},
+    )
+    return output_csv
+
+
+def _collect_pooled(
+    tasks: list[TaskSpec], *, cache_root: Path, embed_fn, min_slides: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Concatenate collect_embeddings across every TaskSpec in `tasks` (one per
+    cohort sharing the same canonical task name) into a single pooled set.
+    Returns (X, y, groups, keys, n_found, n_missing)."""
+    X_parts, y_parts, groups_parts, keys_parts = [], [], [], []
+    n_found_total, n_missing_total = 0, 0
+    for task in tasks:
+        X, y, groups, keys, n_found, n_missing = collect_embeddings(
+            task, cache_root=cache_root, embed_fn=embed_fn, min_slides=min_slides
+        )
+        if X.shape[0]:
+            X_parts.append(X)
+            y_parts.append(y)
+            groups_parts.append(groups)
+            keys_parts.append(keys)
+        n_found_total += n_found
+        n_missing_total += n_missing
+    if not X_parts:
+        empty = np.empty((0,))
+        return empty, empty, empty, empty, n_found_total, n_missing_total
+    return (
+        np.concatenate(X_parts), np.concatenate(y_parts), np.concatenate(groups_parts), np.concatenate(keys_parts),
+        n_found_total, n_missing_total,
+    )
+
+
+def run_cross_cohort(
+    tasks: list[TaskSpec], *, models: list[tuple[str, object]], train_cohorts: set[str], test_cohorts: set[str],
+    teacher_wsi_root: Path, tile_input_root: Path | None, device: torch.device, min_slides: int, use_wandb: bool,
+) -> list[dict]:
+    """EAGLE-style protocol: fit on all labeled slides pooled from `train_cohorts`,
+    evaluate once on `test_cohorts` -- no k-fold, no shared patients (disjoint
+    cohorts). Tasks are matched across train/test by canonical_task_name, since
+    TCGA and CPTAC/Patho-Bench label files use different task-name conventions
+    for the same biomarker."""
+    by_canonical: dict[str, list[TaskSpec]] = {}
+    for task in tasks:
+        if task.members:  # skip synthetic cross-cohort union tasks; this function does its own union
+            continue
+        by_canonical.setdefault(canonical_task_name(task.task), []).append(task)
+
+    results: list[dict] = []
+    for canonical, members in sorted(by_canonical.items()):
+        train_tasks = [t for t in members if t.cohort in train_cohorts]
+        test_tasks = [t for t in members if t.cohort in test_cohorts]
+        if not train_tasks or not test_tasks:
+            continue
+        for model_name, student in models:
+            if student is None:
+                embed_fn, cache_root = _baseline_embedding, teacher_wsi_root
+            else:
+                embed_fn = lambda cohort_dir, slide_id, _s=student: _pruned_embedding(
+                    cohort_dir, slide_id, student=_s, device=device
+                )
+                cache_root = tile_input_root
+
+            X_train, y_train, _g1, _k1, n_found_tr, n_missing_tr = _collect_pooled(
+                train_tasks, cache_root=cache_root, embed_fn=embed_fn, min_slides=min_slides
+            )
+            X_test, y_test, _g2, _k2, n_found_te, n_missing_te = _collect_pooled(
+                test_tasks, cache_root=cache_root, embed_fn=embed_fn, min_slides=min_slides
+            )
+            row = {
+                "cohort": f"{'+'.join(sorted(train_cohorts))}->{'+'.join(sorted(test_cohorts))}",
+                "task": canonical,
+                "model": model_name,
+                "n_train_found": n_found_tr, "n_train_missing": n_missing_tr,
+                "n_test_found": n_found_te, "n_test_missing": n_missing_te,
+                "protocol": "cross_cohort_holdout",
+            }
+            if n_found_tr < min_slides or n_found_te < min_slides:
+                row["status"] = "skipped"
+                row["reason"] = f"train={n_found_tr} test={n_found_te} slides found (need >= {min_slides} each)"
+                print(f"[skip] {row['cohort']}/{canonical} model={model_name}: {row['reason']}")
+            elif len(set(y_train)) < 2 or len(set(y_test)) < 2:
+                row["status"] = "skipped"
+                row["reason"] = "train or test split has only 1 class"
+                print(f"[skip] {row['cohort']}/{canonical} model={model_name}: {row['reason']}")
+            else:
+                metrics = evaluate_train_test(X_train, y_train, X_test, y_test)
+                row.update(metrics)
+                print(f"[eval] {row['cohort']}/{canonical} model={model_name}: {metrics}")
+            results.append(row)
+            if use_wandb:
+                import wandb
+
+                wandb.log({f"{canonical}/{model_name}/{k}": v for k, v in row.items() if isinstance(v, (int, float))})
+    return results
+
+
+def run_fig2_protocol(
+    tasks: list[TaskSpec], *, models: list[tuple[str, object]], train_cohorts: set[str], test_cohorts: set[str],
+    teacher_wsi_root: Path, tile_input_root: Path | None, device: torch.device, min_slides: int, use_wandb: bool,
+    folds: int, seed: int,
+) -> list[dict]:
+    """EAGLE's main-benchmark (Fig. 1-5) protocol: 5-fold-ensemble MLP head
+    trained on `train_cohorts`, scored once on `test_cohorts`. See
+    `evaluate_fig2_protocol` for the fold/ensemble mechanics; this function
+    only does task matching and embedding collection, mirroring
+    `run_cross_cohort`'s structure."""
+    by_canonical: dict[str, list[TaskSpec]] = {}
+    for task in tasks:
+        if task.members:
+            continue
+        by_canonical.setdefault(canonical_task_name(task.task), []).append(task)
+
+    results: list[dict] = []
+    for canonical, members in sorted(by_canonical.items()):
+        train_tasks = [t for t in members if t.cohort in train_cohorts]
+        test_tasks = [t for t in members if t.cohort in test_cohorts]
+        if not train_tasks or not test_tasks:
+            continue
+        for model_name, student in models:
+            if student is None:
+                embed_fn, cache_root = _baseline_embedding, teacher_wsi_root
+            else:
+                embed_fn = lambda cohort_dir, slide_id, _s=student: _pruned_embedding(
+                    cohort_dir, slide_id, student=_s, device=device
+                )
+                cache_root = tile_input_root
+
+            X_train, y_train, groups_train, _k1, n_found_tr, n_missing_tr = _collect_pooled(
+                train_tasks, cache_root=cache_root, embed_fn=embed_fn, min_slides=min_slides
+            )
+            X_test, y_test, _g2, _k2, n_found_te, n_missing_te = _collect_pooled(
+                test_tasks, cache_root=cache_root, embed_fn=embed_fn, min_slides=min_slides
+            )
+            row = {
+                "cohort": f"{'+'.join(sorted(train_cohorts))}->{'+'.join(sorted(test_cohorts))}",
+                "task": canonical,
+                "model": model_name,
+                "n_train_found": n_found_tr, "n_train_missing": n_missing_tr,
+                "n_test_found": n_found_te, "n_test_missing": n_missing_te,
+                "protocol": "fig2_mlp_ensemble",
+            }
+            if n_found_tr < min_slides or n_found_te < min_slides:
+                row["status"] = "skipped"
+                row["reason"] = f"train={n_found_tr} test={n_found_te} slides found (need >= {min_slides} each)"
+                print(f"[skip] {row['cohort']}/{canonical} model={model_name}: {row['reason']}")
+            elif len(set(y_train)) < 2 or len(set(y_test)) < 2:
+                row["status"] = "skipped"
+                row["reason"] = "train or test split has only 1 class"
+                print(f"[skip] {row['cohort']}/{canonical} model={model_name}: {row['reason']}")
+            else:
+                metrics = evaluate_fig2_protocol(
+                    X_train, y_train, groups_train, X_test, y_test, device=device, folds=folds, seed=seed
+                )
+                row.update(metrics)
+                print(f"[eval] {row['cohort']}/{canonical} model={model_name}: {metrics}")
+            results.append(row)
+            if use_wandb:
+                import wandb
+
+                wandb.log({f"{canonical}/{model_name}/{k}": v for k, v in row.items() if isinstance(v, (int, float))})
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     add_experiment_arguments(parser)
@@ -261,6 +643,25 @@ def main() -> int:
     )
     parser.add_argument("--min-slides", type=int, default=20, help="Skip a task if fewer labeled+cached slides are found")
     parser.add_argument("--task", action="append", help="Evaluate only this task name; repeat to select more")
+    parser.add_argument(
+        "--train-cohort", action="append", default=None,
+        help="Repeatable. With --test-cohort, switch from within-cohort k-fold CV to "
+        "EAGLE-style protocol: fit once on all labeled slides pooled from these cohorts, "
+        "evaluate once on --test-cohort. Tasks are matched across cohorts by canonical "
+        "biomarker name (see canonical_task_name), since TCGA and CPTAC/Patho-Bench name "
+        "the same task differently (e.g. tcga's kras_mutation == cptac's KRAS_mutation).",
+    )
+    parser.add_argument(
+        "--test-cohort", action="append", default=None,
+        help="Repeatable. Cohorts held out for testing; see --train-cohort.",
+    )
+    parser.add_argument(
+        "--classifier", choices=("logreg", "mlp"), default="logreg",
+        help="With --train-cohort/--test-cohort: 'logreg' fits evaluate_train_test's single "
+        "LogisticRegression (default); 'mlp' switches to run_fig2_protocol, EAGLE's main-"
+        "benchmark recipe (5-fold-ensemble MLP head, one fold-model per TCGA fold, "
+        "predictions averaged on the external test cohort). Ignored in within-cohort CV mode.",
+    )
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--hf-token", default=None)
@@ -300,6 +701,28 @@ def main() -> int:
         import wandb
 
         wandb.init(project=args.wandb_project, mode=args.wandb_mode, config=vars(args))
+
+    if args.train_cohort or args.test_cohort:
+        if not (args.train_cohort and args.test_cohort):
+            raise SystemExit("--train-cohort and --test-cohort must both be given")
+        if args.classifier == "mlp":
+            results = run_fig2_protocol(
+                tasks, models=models, train_cohorts=set(args.train_cohort), test_cohorts=set(args.test_cohort),
+                teacher_wsi_root=args.teacher_wsi_root, tile_input_root=args.tile_input_root, device=device,
+                min_slides=args.min_slides, use_wandb=use_wandb, folds=args.folds, seed=args.seed,
+            )
+        else:
+            results = run_cross_cohort(
+                tasks, models=models, train_cohorts=set(args.train_cohort), test_cohorts=set(args.test_cohort),
+                teacher_wsi_root=args.teacher_wsi_root, tile_input_root=args.tile_input_root, device=device,
+                min_slides=args.min_slides, use_wandb=use_wandb,
+            )
+        _write_results(results, experiment_run, args)
+        if use_wandb:
+            import wandb
+
+            wandb.finish()
+        return 0
 
     results: list[dict] = []
     for task in tasks:
@@ -353,22 +776,7 @@ def main() -> int:
 
                 wandb.log({f"{task.cohort}/{task.task}/{model_name}/{k}": v for k, v in row.items() if isinstance(v, (int, float))})
 
-    run_name = experiment_run.run_name
-    output_csv = experiment_run.result_dir / "results.csv"
-    if args.output_csv is not None and args.output_csv.expanduser().resolve() != output_csv.resolve():
-        raise ValueError(f"--output-csv must equal canonical path: {output_csv}")
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in results for key in row})
-    with open(output_csv, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
-    print(f"wrote {len(results)} rows to {output_csv}")
-    publish_run_summary(
-        run=experiment_run,
-        args=args,
-        summary={"output_csv": str(output_csv), "result_rows": len(results)},
-    )
+    _write_results(results, experiment_run, args)
 
     if use_wandb:
         import wandb

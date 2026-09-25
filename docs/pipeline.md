@@ -180,6 +180,76 @@ python scripts/evaluation/evaluate_wsi_downstream.py \
 Both evaluations compare baseline and pruned representations on the same examples
 and train only downstream heads.
 
+By default this is a within-cohort protocol: `StratifiedGroupKFold` (patient-grouped)
+inside each `<cohort>/labels/<task>.csv` found under `--labels-root`. It does not test
+generalization to an unseen cohort, and it is not the protocol EAGLE (the reference
+paper for the WSI encoder, `s41467-026-74918-9.pdf`) reports its headline AUROCs with.
+
+For an EAGLE-comparable external-validation run, add `--train-cohort`/`--test-cohort`
+(repeatable; matches tasks across cohorts by canonical biomarker name, e.g. TCGA's
+`kras_mutation` == CPTAC's `KRAS_mutation` — see `canonical_task_name` in the script).
+Two protocols are available once these are set, via `--classifier`:
+
+- `--classifier logreg` (default in this mode): single `LogisticRegression` fit once on
+  the pooled train cohorts, evaluated once on the pooled test cohorts. No CV.
+- `--classifier mlp`: EAGLE's actual main-benchmark (Fig. 1-5) recipe — a 5-fold split
+  of the train cohorts (patient-grouped, 80% train / 20% validation per fold for early
+  stopping), one MLP (hidden=256, SiLU, dropout, AdamW, one-cycle LR, 32 epochs,
+  class-weighted cross-entropy) trained per fold, each of the 5 fold-models scored once
+  on the external test cohorts, and per-slide test probabilities averaged across the 5
+  fold-models before computing AUROC/accuracy/F1. This is the protocol to use when the
+  goal is a number directly comparable to EAGLE's reported AUROCs, not just an internal
+  ablation between baseline TITAN and a pruned checkpoint.
+
+```bash
+python scripts/evaluation/evaluate_wsi_downstream.py \
+  --experiment-id wsi_eval_downstream_conch15_titan_pilot --variant-id src00_keep15 \
+  --teacher-wsi-root <merged_teacher_root> \
+  --classifier mlp \
+  --train-cohort TCGA-BRCA --train-cohort TCGA-COAD --train-cohort TCGA-LUAD \
+  --train-cohort TCGA-LUSC --train-cohort TCGA-READ --train-cohort TCGA-STAD \
+  --test-cohort CPTAC-BRCA --test-cohort CPTAC-COAD --test-cohort CPTAC-LSCC --test-cohort CPTAC-LUAD
+```
+
+Notes/gotchas found running this for the first time:
+
+- `--experiment-id`/`--variant-id` are always required (`add_experiment_arguments`); reuse
+  a `status = "ready"` entry from `configs/experiments/registry.toml`
+  (`wsi_eval_downstream_conch15_titan_pilot`/`src00_keep15` works for a baseline-only run,
+  since the registry only validates `tile_encoder`/`wsi_encoder`/`dataset_id` when the CLI
+  actually sets those, which this script does not).
+- `--teacher-wsi-root` must be **one** directory with every cohort as a direct
+  subdirectory. The TCGA and CPTAC TITAN caches currently live under two separate parents
+  (`$EAF_WSI_ROOT/caches/wsi_eaf/tcga_v1/titan/<cohort>` and
+  `.../cptac_v1/titan/<cohort>`), so a merged root has to be assembled first, e.g.:
+  ```bash
+  mkdir -p $EAF_WSI_ROOT/caches/wsi_eaf/merged_teacher_tcga_cptac
+  cd $EAF_WSI_ROOT/caches/wsi_eaf/merged_teacher_tcga_cptac
+  for d in $EAF_WSI_ROOT/caches/wsi_eaf/tcga_v1/titan/*/ $EAF_WSI_ROOT/caches/wsi_eaf/cptac_v1/titan/*/; do
+    ln -sfn "$d" "$(basename "$d")"
+  done
+  ```
+  This is symlink-only (no data copied/moved) and is the `<merged_teacher_root>` used above.
+- `--task` filters on the raw, pre-canonicalization task name (case-sensitive), so pass
+  every spelling that appears on disk for the biomarker you want (e.g.
+  `--task kras_mutation --task KRAS_mutation` for TCGA+CPTAC), otherwise the cohorts using
+  the other spelling silently drop out with zero output rows instead of an error.
+
+Caveat: EAGLE's external test also includes DACHS, Bern/Kiel and IEO, which are
+restricted-access third-party cohorts (institutional DUA/ethics approval, not publicly
+downloadable) and are not part of this repo's benchmark — CPTAC is currently the only
+external test cohort available here. `valentino_v1` (CRC) and `dhmc_luad_v1` (LUAD),
+already downloaded under Patho-Bench but not yet tessellated/cached, are candidate
+additional external cohorts for the same cancer types once their caching pipeline runs.
+
+**Current status (2026-09-25):** the `--classifier mlp` cross-cohort protocol has been run
+once end-to-end as a smoke test (baseline TITAN only, TCGA-train/CPTAC-test,
+`kras_mutation`/`KRAS_mutation`, 5-fold-ensemble MLP): AUROC 0.525 on 684 CPTAC test slides
+(`$EAF_WSI_ROOT/results/wsi_eaf/evaluation/wsi_eval_downstream_conch15_titan_pilot/src00_keep15/seed_42/results.csv`).
+This confirms the protocol runs correctly, not that the representation generalizes — it is
+one task, baseline-only, no pruned-checkpoint comparison yet. The full 31-task-equivalent
+run (all `--task`s, baseline + pruned checkpoints) has not been launched.
+
 ## 9. HISTAI + biological extension
 
 Keep this as a separate manifest/corpus ID and run the exact same four training

@@ -231,6 +231,8 @@ blockers = []
 
 [experiments.wsi_eval_downstream_conch15_titan_pilot.variants.src00_keep15]
 
+[experiments.wsi_eval_downstream_conch15_titan_pilot.variants.src01_keep15]
+
 [experiments.hest_biological_conch15_titan]
 family = "wsi_eaf"
 stage = "evaluation"
